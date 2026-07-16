@@ -33,7 +33,7 @@ func Setup(t *testing.T, req *Request) error {
 
 	db := openLocalDB(t)
 	t.Cleanup(func() { _ = db.Close() })
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	deleteLogIDs(t, db, id1, id2)

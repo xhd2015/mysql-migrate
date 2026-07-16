@@ -1,12 +1,13 @@
 # Scenario
 
-**Feature**: thin `cmd/mysql-migrate` binary — less-flags globals, help, `cli.Run` hand-off
+**Feature**: thin `cmd/mysql-migrate` binary — less-flags globals, edge open/Wrap, `cli.Run` hand-off
 
 ```
-# session-built binary; flags/env → Config → cli.Run
+# session-built binary; flags/env → edge open → Config.DB → cli.Run
 operator -> mysql-migrate [--dsn] [--dir] <cmd> [args]
   -> less-flags parse globals
-  -> migrate.Config{DSN, MigrationsDir, ProgramName}
+  -> if dsn: sql.Open → Ping → sqlexec.Wrap → cfg.DB
+  -> migrate.Config{DB, MigrationsDir, ProgramName}  # no DSN field
   -> cli.Run(cfg, remain) -> stdout/stderr + exit code
 
 # root help (binary-owned)
@@ -16,44 +17,46 @@ empty args | -h -> Usage (commands + --dsn/--dir) -> exit 0
 ## Preconditions
 
 - Module: `github.com/xhd2015/mysql-migrate` (repo root `go.mod`).
-- Binary package: `./cmd/mysql-migrate` (empty stub until implementer).
-- Library: `cli.Run` already implemented under `cli/` (P5); this tree only
-  locks main wiring.
+- Binary package: `./cmd/mysql-migrate` — edge opens DSN only; core Config is DB-only.
+- Library: `cli.Run` never `sql.Open`; requires non-nil `cfg.DB` for DB cmds.
 - Global flags (less-flags): `--dsn`, `--dir`; help `-h` / `--help`.
 - Env fallbacks: `MIGRATE_MYSQL_DSN`, `MIGRATE_MYSQL_DIR` (optional; flag wins).
 - Session cache: `$TMPDIR/mysql-migrate-cmd-doctest-<DOCTEST_SESSION_ID>/`
   holds built binary + lock/ready markers (shared across parallel leaves).
+- MySQL-touching leaves acquire session `mysql-exclusive.lock` so
+  `status/ensure-created` can drop `t_sql_migration_log` without racing
+  sibling DB leaves in this tree.
 - Default `ClearMigrateEnv=true` so ambient migrate env does not leak into
   missing-DSN leaves.
 - Module root from this DOCTEST root: `DOCTEST_ROOT/../..` (`tests/cmd` → repo).
-- Apply leaf needs MySQL (default `localhost:9306` / `lifespan_db`); skips
-  when unreachable. Harness does **not** start containers.
+- DB leaves need MySQL (default `localhost:9306` / `lifespan_db`); skip when
+  unreachable. Harness does **not** start containers.
 - Apply DSN should allow multi-statement SQL (`multiStatements=true`).
 
 ## Steps
 
 1. Root Setup builds (or reuses) the session binary and sets isolation defaults.
-2. Leaves set `Args` (and fixtures / AssertDSN for apply).
+2. Leaves set `Args` (and fixtures / AssertDSN for DB leaves).
 3. Root `Run` execs `Bin` with controlled env; Assert checks exit + tokens /
    log side effects.
 
 ## Context
 
-- Classic TDD: empty `main` builds and runs with exit 0 / no help text →
-  assertion RED until implementer lands less-flags + `cli.Run`.
+- P2 edge contract: `--dsn`/`--dir` → Open → Wrap → `cli.Run`; no DSN on Config.
 - Prefer flock session build over per-leaf `go run` for parallel leaves.
 - Do not re-test full CLI matrix here (`tests/cli/` already seals it).
 
 ```go
 import (
 	"context"
-	"database/sql"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -309,5 +312,70 @@ func stdoutHasApplyProgress(stdout, migrationID, token string) bool {
 		}
 	}
 	return strings.Contains(stdout, token)
+}
+
+// mysqlExclusiveFD holds the flock fd for the duration of a MySQL-touching
+// leaf (Setup → Run → Assert). File lock serializes sibling packages.
+var mysqlExclusiveFD *os.File
+
+// acquireMySQLExclusive takes session mysql-exclusive.lock (LOCK_EX) and
+// releases on t.Cleanup. Call from every leaf Setup that touches the shared
+// harness MySQL (status/apply DB leaves).
+func acquireMySQLExclusive(t *testing.T) {
+	t.Helper()
+	if mysqlExclusiveFD != nil {
+		return
+	}
+	cache := sessionCacheDir()
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatalf("mysql exclusive cache: %v", err)
+	}
+	lockPath := filepath.Join(cache, "mysql-exclusive.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open mysql-exclusive.lock: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		t.Fatalf("flock mysql-exclusive.lock: %v", err)
+	}
+	mysqlExclusiveFD = f
+	t.Cleanup(func() {
+		if mysqlExclusiveFD == nil {
+			return
+		}
+		_ = syscall.Flock(int(mysqlExclusiveFD.Fd()), syscall.LOCK_UN)
+		_ = mysqlExclusiveFD.Close()
+		mysqlExclusiveFD = nil
+	})
+}
+
+// dropMigrationLogTable drops t_sql_migration_log on the harness DB.
+// Caller must hold acquireMySQLExclusive so sibling leaves do not race.
+func dropMigrationLogTable(t *testing.T) {
+	t.Helper()
+	db := openLocalDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE IF EXISTS t_sql_migration_log`); err != nil {
+		t.Fatalf("DROP t_sql_migration_log: %v", err)
+	}
+}
+
+// requireMissingDSNUsage checks exit 2 and Error tokens for nil-DB path.
+// Binary leaves cfg.DB nil when no flag/env DSN; cli prints missing DB.
+func requireMissingDSNUsage(t *testing.T, resp *Response) {
+	t.Helper()
+	requireExit(t, resp, 2)
+	combined := resp.Stdout + "\n" + resp.Stderr
+	lower := strings.ToLower(combined)
+	if !strings.Contains(lower, "dsn") &&
+		!strings.Contains(lower, "missing") &&
+		!strings.Contains(lower, "db") {
+		t.Fatalf("missing DSN usage must mention dsn, missing, or db:\nstdout=%q\nstderr=%q",
+			resp.Stdout, resp.Stderr)
+	}
+	if strings.Contains(combined, "--local") || strings.Contains(combined, "--remote") {
+		t.Fatalf("usage error must not require --local/--remote:\n%s", combined)
+	}
 }
 ```

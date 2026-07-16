@@ -1,11 +1,11 @@
 # Scenario
 
-**Feature**: binary usage errors for incomplete global config (offline)
+**Feature**: binary usage errors when DSN absent → nil cfg.DB (offline)
 
 ```
-# apply without DSN (flag and env both absent) → usage exit 2
-mysql-migrate --dir <tmp> apply
-  -> Error missing DSN -> exit 2 (no MySQL open)
+# DB subcommand without DSN (flag and env both absent) → usage exit 2
+mysql-migrate --dir <tmp> status|apply
+  -> no sql.Open; cfg.DB nil -> Error missing DB -> exit 2
 ```
 
 ## Preconditions
@@ -13,15 +13,16 @@ mysql-migrate --dir <tmp> apply
 - Leaves under this branch expect exit **2** (usage).
 - Migrate env stripped so ambient DSN cannot satisfy the binary.
 - Offline — failure is config/usage, not DB connectivity.
+- Split by subcommand: `apply-missing-dsn` vs `status-missing-dsn`.
 
 ## Steps
 
 1. Leaf sets Args that omit DSN (and keep ClearMigrateEnv).
-2. Exec binary; Assert non-zero usage exit + dsn Error tokens.
+2. Exec binary; Assert exit 2 + missing/DB/dsn Error tokens.
 
 ## Context
 
-- Sibling of `help/` (exit 0) and `apply/` (happy DB path).
+- Sibling of `help/` (exit 0) and `status/` / `apply/` (happy DB path via Wrap).
 
 ```go
 import "testing"

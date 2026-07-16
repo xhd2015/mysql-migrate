@@ -23,7 +23,8 @@ caller -> Get(id) | List() -> rows for plan/status
 - Target package (to implement):
   `migrate/logrepo`
   import `github.com/xhd2015/mysql-migrate/migrate/logrepo`
-- Live DB via `database/sql` + `github.com/go-sql-driver/mysql` (no `target` package).
+- Live DB via harness `database/sql` + `github.com/go-sql-driver/mysql`, then
+  `sqlexec.Wrap` for all logrepo calls (P1: `sqlexec.DB`, not `*sql.DB`).
 - **DSN resolution** (document for operators / CI):
   1. Env `MIGRATE_MYSQL_DSN` if non-empty
   2. Else default:
@@ -39,8 +40,8 @@ caller -> Get(id) | List() -> rows for plan/status
 
 1. Root Setup pings resolved DSN (`ensureMySQL`); skip leaf if down.
 2. Leaf Setup sets `req.Op`, unique `MigrationID`, and op-specific fields.
-3. `Run` opens DB, ensures/seeds as needed, runs the logrepo API, returns
-   row snapshot(s).
+3. `Run` opens `*sql.DB`, wraps with `sqlexec.Wrap`, ensures/seeds as needed,
+   runs the logrepo API with `sqlexec.DB`, returns row snapshot(s).
 4. Leaf Assert checks status, fields, uniqueness, or errors.
 
 ## Context

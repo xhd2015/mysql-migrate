@@ -14,8 +14,10 @@ Target package (implementer provides):
 github.com/xhd2015/mysql-migrate/migrate/logrepo
 ```
 
-Live MySQL via `database/sql` + `github.com/go-sql-driver/mysql`. DSN from
-env `MIGRATE_MYSQL_DSN` or the default local dev DSN (see SETUP).
+Live MySQL via harness `database/sql` + `github.com/go-sql-driver/mysql`, then
+**`sqlexec.Wrap`** into `sqlexec.DB` for all logrepo calls (P1: logrepo takes
+`sqlexec.DB`, not `*sql.DB`). Harness DSN from env `MIGRATE_MYSQL_DSN` or the
+default local dev DSN (see SETUP).
 
 # DSN (Domain Specific Notion)
 
@@ -101,15 +103,15 @@ Leaves must fail (compile or assertion RED) until implementer lands:
 migrate/logrepo
 ```
 
-Public API expected by these tests:
+Public API expected by these tests (P1: **`sqlexec.DB`**, not `*sql.DB`):
 
 ```go
 package logrepo
 
-import "database/sql"
+import "github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 
 // EnsureTable creates t_sql_migration_log if missing (IF NOT EXISTS). Idempotent.
-func EnsureTable(db *sql.DB) error
+func EnsureTable(db sqlexec.DB) (created bool, err error)
 
 // Row maps one log table row (align fields with plan.LogRow for later conversion).
 type Row struct {
@@ -124,20 +126,20 @@ type Row struct {
     // optional timestamps may exist on the table; not required on Row for asserts
 }
 
-func List(db *sql.DB) ([]Row, error)
-func Get(db *sql.DB, migrationID string) (Row, bool, error)
+func List(db sqlexec.DB) ([]Row, error)
+func Get(db sqlexec.DB, migrationID string) (Row, bool, error)
 
 // Upsert lifecycle (unique on migration_id — prefer UPSERT / ON DUPLICATE KEY).
-func MarkRunning(db *sql.DB, migrationID string, exactlyOnce bool, contentSHA256 string, appliedBy string) error
-func MarkSuccess(db *sql.DB, migrationID string, durationMS int) error
-func MarkFailed(db *sql.DB, migrationID string, durationMS int, errMsg string) error
+func MarkRunning(db sqlexec.DB, migrationID string, exactlyOnce bool, contentSHA256 string, appliedBy string) error
+func MarkSuccess(db sqlexec.DB, migrationID string, durationMS int) error
+func MarkFailed(db sqlexec.DB, migrationID string, durationMS int, errMsg string) error
 
 // Human recovery (P8 CLI-wraps these; persistence required now).
 // MarkDone / MarkFailedManual / AllowRetry require non-empty note.
-func MarkDone(db *sql.DB, migrationID string, note string) error           // status=success + note
-func MarkFailedManual(db *sql.DB, migrationID string, note string) error // status=failed + note
-func SetNote(db *sql.DB, migrationID string, note string) error
-func AllowRetry(db *sql.DB, migrationID string, note string) error // EO only; status→pending + note
+func MarkDone(db sqlexec.DB, migrationID string, note string) error           // status=success + note
+func MarkFailedManual(db sqlexec.DB, migrationID string, note string) error // status=failed + note
+func SetNote(db sqlexec.DB, migrationID string, note string) error
+func AllowRetry(db sqlexec.DB, migrationID string, note string) error // EO only; status→pending + note
 ```
 
 **Table** `t_sql_migration_log` (tool-owned, not a numbered migration file):
@@ -182,6 +184,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/xhd2015/mysql-migrate/migrate/logrepo"
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
 
 // defaultLocalDSN is the lifelog/local-dev MySQL DSN used when
@@ -271,8 +274,8 @@ func resolveDSN() string {
 	return defaultLocalDSN
 }
 
-// openDB opens MySQL with the resolved DSN and pings.
-func openDB(t *testing.T) (*sql.DB, error) {
+// openSQL opens MySQL with the resolved DSN and pings. Harness-only.
+func openSQL(t *testing.T) (*sql.DB, error) {
 	t.Helper()
 	dsn := resolveDSN()
 	db, err := sql.Open("mysql", dsn)
@@ -297,28 +300,29 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return nil, fmt.Errorf("empty Op")
 	}
 
-	db, err := openDB(t)
+	raw, err := openSQL(t)
 	if err != nil {
 		return nil, err
 	}
+	db := sqlexec.Wrap(raw)
 	defer db.Close()
 
 	switch req.Op {
 	case "ensure_twice":
-		if err := logrepo.EnsureTable(db); err != nil {
+		if _, err := logrepo.EnsureTable(db); err != nil {
 			return &Response{}, err
 		}
-		if err := logrepo.EnsureTable(db); err != nil {
+		if _, err := logrepo.EnsureTable(db); err != nil {
 			return &Response{}, err
 		}
-		exists, qerr := tableExists(db, "t_sql_migration_log")
+		exists, qerr := tableExists(raw, "t_sql_migration_log")
 		if qerr != nil {
 			return &Response{EnsureCallsOK: true}, qerr
 		}
 		return &Response{EnsureCallsOK: true, TableExists: exists}, nil
 
 	case "lifecycle_success":
-		if err := ensureReady(db, req.MigrationID); err != nil {
+		if err := ensureReady(db, raw, req.MigrationID); err != nil {
 			return nil, err
 		}
 		if err := logrepo.MarkRunning(db, req.MigrationID, req.ExactlyOnce, req.ContentSHA256, req.AppliedBy); err != nil {
@@ -330,7 +334,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return fetchRowResp(db, req.MigrationID)
 
 	case "lifecycle_failed":
-		if err := ensureReady(db, req.MigrationID); err != nil {
+		if err := ensureReady(db, raw, req.MigrationID); err != nil {
 			return nil, err
 		}
 		if err := logrepo.MarkRunning(db, req.MigrationID, req.ExactlyOnce, req.ContentSHA256, req.AppliedBy); err != nil {
@@ -342,7 +346,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return fetchRowResp(db, req.MigrationID)
 
 	case "unique_upsert":
-		if err := ensureReady(db, req.MigrationID); err != nil {
+		if err := ensureReady(db, raw, req.MigrationID); err != nil {
 			return nil, err
 		}
 		if err := logrepo.MarkRunning(db, req.MigrationID, req.ExactlyOnce, req.ContentSHA256, req.AppliedBy); err != nil {
@@ -356,7 +360,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		if err != nil {
 			return resp, err
 		}
-		n, cerr := countMigrationID(db, req.MigrationID)
+		n, cerr := countMigrationID(raw, req.MigrationID)
 		if cerr != nil {
 			return resp, cerr
 		}
@@ -364,7 +368,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return resp, nil
 
 	case "list":
-		if err := logrepo.EnsureTable(db); err != nil {
+		if _, err := logrepo.EnsureTable(db); err != nil {
 			return nil, err
 		}
 		// Seed primary + extras.
@@ -373,7 +377,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 			if id == "" {
 				continue
 			}
-			_ = deleteMigrationID(db, id)
+			_ = deleteMigrationID(raw, id)
 			if err := logrepo.MarkRunning(db, id, false, "hash-"+id, "list-seed"); err != nil {
 				return &Response{}, err
 			}
@@ -385,7 +389,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return &Response{Rows: toRowViews(rows)}, nil
 
 	case "mark_done":
-		if err := seedThen(db, req); err != nil {
+		if err := seedThen(db, raw, req); err != nil {
 			return nil, err
 		}
 		if err := logrepo.MarkDone(db, req.MigrationID, req.Note); err != nil {
@@ -394,7 +398,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return fetchRowResp(db, req.MigrationID)
 
 	case "mark_failed_manual":
-		if err := seedThen(db, req); err != nil {
+		if err := seedThen(db, raw, req); err != nil {
 			return nil, err
 		}
 		if err := logrepo.MarkFailedManual(db, req.MigrationID, req.Note); err != nil {
@@ -403,7 +407,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return fetchRowResp(db, req.MigrationID)
 
 	case "set_note":
-		if err := seedThen(db, req); err != nil {
+		if err := seedThen(db, raw, req); err != nil {
 			return nil, err
 		}
 		if err := logrepo.SetNote(db, req.MigrationID, req.Note); err != nil {
@@ -412,7 +416,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		return fetchRowResp(db, req.MigrationID)
 
 	case "allow_retry":
-		if err := seedThen(db, req); err != nil {
+		if err := seedThen(db, raw, req); err != nil {
 			return nil, err
 		}
 		if err := logrepo.AllowRetry(db, req.MigrationID, req.Note); err != nil {
@@ -425,12 +429,12 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 	}
 }
 
-func ensureReady(db *sql.DB, migrationID string) error {
-	if err := logrepo.EnsureTable(db); err != nil {
+func ensureReady(db sqlexec.DB, raw *sql.DB, migrationID string) error {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		return err
 	}
 	if migrationID != "" {
-		_ = deleteMigrationID(db, migrationID)
+		_ = deleteMigrationID(raw, migrationID)
 	}
 	return nil
 }
@@ -439,8 +443,8 @@ func ensureReady(db *sql.DB, migrationID string) error {
 // SeedStatus: "" or "running" → MarkRunning only;
 // "success" → MarkRunning + MarkSuccess;
 // "failed" → MarkRunning + MarkFailed.
-func seedThen(db *sql.DB, req *Request) error {
-	if err := ensureReady(db, req.MigrationID); err != nil {
+func seedThen(db sqlexec.DB, raw *sql.DB, req *Request) error {
+	if err := ensureReady(db, raw, req.MigrationID); err != nil {
 		return err
 	}
 	if err := logrepo.MarkRunning(db, req.MigrationID, req.ExactlyOnce, req.ContentSHA256, req.AppliedBy); err != nil {
@@ -462,7 +466,7 @@ func seedThen(db *sql.DB, req *Request) error {
 	}
 }
 
-func fetchRowResp(db *sql.DB, migrationID string) (*Response, error) {
+func fetchRowResp(db sqlexec.DB, migrationID string) (*Response, error) {
 	row, ok, err := logrepo.Get(db, migrationID)
 	if err != nil {
 		return &Response{}, err

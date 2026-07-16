@@ -1,5 +1,6 @@
-// Package cli implements the non-interactive mysql-migrate operator CLI library.
+// Package cli is the non-interactive MySQL migrate operator library.
 //
-// Entry point: Run(cfg migrate.Config, args []string) int
-// Never calls os.Exit; DSN and MigrationsDir come from Config (no --local/--remote).
+// Public entry: Run(cfg migrate.Config, args []string) int.
+// Never calls os.Exit; never sql.Open. DB and MigrationsDir come from Config
+// (no --local/--remote). Nil cfg.DB on DB subcommands is usage exit 2.
 package cli

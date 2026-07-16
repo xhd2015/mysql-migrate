@@ -1,8 +1,11 @@
-# mysql-migrate — module scaffold + Config (P1)
+# mysql-migrate — module scaffold + Config (P1, DB-only)
 
 Standalone module scaffold: public `Config` type under package `migrate`,
 module path `github.com/xhd2015/mysql-migrate`, and a buildable package layout.
 Stubs for inventory/plan/logrepo/cli/cmd are allowed; no migration logic yet.
+
+P1 sqlexec contract: **Config carries `DB sqlexec.DB`**, not a DSN string.
+Opening connections is outside the library (callers use `sqlexec.Wrap`).
 
 # DSN (Domain Specific Notion)
 
@@ -14,8 +17,12 @@ Stubs for inventory/plan/logrepo/cli/cmd are allowed; no migration logic yet.
   `github.com/xhd2015/mysql-migrate/migrate`; holds the public `Config` type
   (file such as `migrate/config.go`).
 - **Config** — connection and identity settings for later migration commands:
-  `DSN`, `MigrationsDir`, `ProgramName`, `AppliedBy` (all `string`).
-- **Stub packages** (optional at P1) — `migrate/inventory`, `migrate/plan`,
+  `DB` (`sqlexec.DB`), `MigrationsDir`, `ProgramName`, `AppliedBy`. **No DSN
+  field**.
+- **sqlexec package** — `github.com/xhd2015/mysql-migrate/migrate/sqlexec`
+  provides the `DB` interface type referenced by Config (may be stubbed until
+  full implementer pass; field type must still compile).
+- **Stub packages** (optional at scaffold) — `migrate/inventory`, `migrate/plan`,
   `migrate/logrepo`, `cli`, `cmd/mysql-migrate`; may be empty packages so
   `go build ./...` still succeeds.
 - **Caller** — any consumer (tests, future CLI) that imports `migrate` and
@@ -25,8 +32,8 @@ Stubs for inventory/plan/logrepo/cli/cmd are allowed; no migration logic yet.
 
 - Caller imports `github.com/xhd2015/mysql-migrate/migrate` and obtains type
   `Config` without build errors.
-- Zero-value `Config{}` is valid; all four fields default to empty string.
-- Populated `Config` stores and returns the four string fields as set.
+- Zero-value `Config{}` is valid; `DB` is nil; string fields default to empty.
+- Populated `Config` stores `DB` and the three string fields as set.
 - From the module root, `go build ./...` exits 0 (stubs allowed).
 
 ## Version
@@ -39,19 +46,19 @@ Split on **verification subject** (what exit-criterion surface we check):
 
 ```
 tests/scaffold/
-├── config-fields-exist/   # Config field surface: zero + populated
+├── config-fields-exist/   # Config field surface: zero + populated (DB, not DSN)
 ├── module-importable/     # import path + package identity via reflect
 └── packages-build/        # go build ./... at module root
 ```
 
-Siblings are MECE over P1 exit criteria: type shape, importability, and
+Siblings are MECE over scaffold exit criteria: type shape, importability, and
 module buildability. No inventory/plan/apply behavior here (later phases).
 
 ## Test Case Index
 
 | # | Path | Preconditions | Expected |
 |---|------|---------------|----------|
-| 1 | `config-fields-exist/` | construct zero-value and populated `migrate.Config` | four fields readable; zeros are `""` |
+| 1 | `config-fields-exist/` | construct zero-value and populated `migrate.Config` | `DB` nil/zero; strings readable; **no DSN field** |
 | 2 | `module-importable/` | import `migrate` package | `PkgPath` is `github.com/xhd2015/mysql-migrate/migrate`; type name `Config` |
 | 3 | `packages-build/` | module root = repo (two levels above this tree) | `go build ./...` exit 0 |
 
@@ -65,8 +72,9 @@ doctest test ./tests/scaffold
 go build ./...
 ```
 
-Classic RED: until `migrate.Config` exists, the generated tests fail to compile
-or `packages-build` fails if the package tree is incomplete.
+Classic RED: until `migrate.Config` has `DB sqlexec.DB` (and no DSN), the
+generated tests fail to compile or assert RED. Full `sqlexec` behavior is
+covered under `tests/sqlexec/`.
 
 ```go
 import (
@@ -78,6 +86,7 @@ import (
 	"testing"
 
 	"github.com/xhd2015/mysql-migrate/migrate"
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
 
 // Mode selects which scaffold surface Run exercises.
@@ -85,8 +94,7 @@ import (
 type Request struct {
 	Mode string
 
-	// config-fields-exist sample values
-	SampleDSN           string
+	// config-fields-exist sample values (DB stays nil in scaffold; type only)
 	SampleMigrationsDir string
 	SampleProgramName   string
 	SampleAppliedBy     string
@@ -94,14 +102,17 @@ type Request struct {
 
 type Response struct {
 	// config-fields-exist
-	ZeroDSN           string
-	ZeroMigrationsDir string
-	ZeroProgramName   string
-	ZeroAppliedBy     string
-	DSN               string
-	MigrationsDir     string
-	ProgramName       string
-	AppliedBy         string
+	ZeroDBIsNil         bool
+	ZeroMigrationsDir   string
+	ZeroProgramName     string
+	ZeroAppliedBy       string
+	PopulatedDBIsNil    bool // scaffold leaves DB nil; still valid Config
+	MigrationsDir       string
+	ProgramName         string
+	AppliedBy           string
+	HasDBField          bool
+	DBFieldIsSqlexecDB  bool
+	HasDSNField         bool // must be false
 
 	// module-importable
 	PkgPath  string
@@ -114,28 +125,35 @@ type Response struct {
 	ModuleRoot    string
 }
 
-// Run exercises the P1 scaffold surface selected by req.Mode.
-// Classic RED until package migrate and type Config exist.
+// Run exercises the scaffold surface selected by req.Mode.
+// Classic RED until Config.DB exists and DSN is removed.
 func Run(t *testing.T, req *Request) (*Response, error) {
 	t.Helper()
 	switch req.Mode {
 	case "config-fields-exist":
 		var zero migrate.Config
 		populated := migrate.Config{
-			DSN:           req.SampleDSN,
+			DB:            nil, // type presence; live Wrap is tests/sqlexec
 			MigrationsDir: req.SampleMigrationsDir,
 			ProgramName:   req.SampleProgramName,
 			AppliedBy:     req.SampleAppliedBy,
 		}
+		typ := reflect.TypeOf(migrate.Config{})
+		dbField, hasDB := typ.FieldByName("DB")
+		_, hasDSN := typ.FieldByName("DSN")
+		dbIface := reflect.TypeOf((*sqlexec.DB)(nil)).Elem()
 		return &Response{
-			ZeroDSN:           zero.DSN,
-			ZeroMigrationsDir: zero.MigrationsDir,
-			ZeroProgramName:   zero.ProgramName,
-			ZeroAppliedBy:     zero.AppliedBy,
-			DSN:               populated.DSN,
-			MigrationsDir:     populated.MigrationsDir,
-			ProgramName:       populated.ProgramName,
-			AppliedBy:         populated.AppliedBy,
+			ZeroDBIsNil:        zero.DB == nil,
+			ZeroMigrationsDir:  zero.MigrationsDir,
+			ZeroProgramName:    zero.ProgramName,
+			ZeroAppliedBy:      zero.AppliedBy,
+			PopulatedDBIsNil:   populated.DB == nil,
+			MigrationsDir:      populated.MigrationsDir,
+			ProgramName:        populated.ProgramName,
+			AppliedBy:          populated.AppliedBy,
+			HasDBField:         hasDB,
+			DBFieldIsSqlexecDB: hasDB && dbField.Type == dbIface,
+			HasDSNField:        hasDSN,
 		}, nil
 
 	case "module-importable":

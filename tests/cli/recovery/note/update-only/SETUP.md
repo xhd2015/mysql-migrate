@@ -35,7 +35,7 @@ func Setup(t *testing.T, req *Request) error {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()
 	})
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	seedSuccess(t, db, id, false, hash, 5, "prior-note-before-update")

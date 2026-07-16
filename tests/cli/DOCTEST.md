@@ -1,8 +1,9 @@
 # mysql-migrate — CLI library `cli.Run(cfg, args)` (P5–P8)
 
 Non-main reusable CLI tests for **status**, **plan**, **apply**, and human
-**recovery** against an injected `migrate.Config` (DSN + MigrationsDir +
-ProgramName + AppliedBy). Classic RED until implementer lands `cli.Run`.
+**recovery** against an injected `migrate.Config` (**DB** + MigrationsDir +
+ProgramName + AppliedBy). P1 contract: Config is **DB-only** (no DSN field);
+the harness opens MySQL and sets `cfg.DB = sqlexec.Wrap(sqlDB)`.
 
 Standalone doctest root under `tests/cli/` so inventory / plan / logrepo /
 scaffold trees stay independent.
@@ -22,8 +23,9 @@ func Run(cfg migrate.Config, args []string) int
 ```
 
 - **Never** `os.Exit` — return exit codes only.
-- **No** `--local` / `--remote` flags (DSN comes from `cfg.DSN`).
-- DB subcommands require non-empty `cfg.DSN` and `cfg.MigrationsDir`.
+- **Never** `sql.Open` inside `cli` — DB comes from `cfg.DB` (`sqlexec.DB`).
+- **No** `--local` / `--remote` flags (target is entirely via Config).
+- DB subcommands require non-nil `cfg.DB` and non-empty `cfg.MigrationsDir`.
 - `cfg.ProgramName` appears in help `Usage` text (default-friendly when empty).
 - Subcommands: `status`, `plan`, `apply [--to]`, `mark-done`, `mark-failed`,
   `note`, `allow-retry`.
@@ -32,16 +34,22 @@ func Run(cfg migrate.Config, args []string) int
 Pipeline (implementer):
 
 ```text
-sql.Open(cfg.DSN) → logrepo.EnsureTable → inventory.ListDir(cfg.MigrationsDir)
+cfg.DB (already open) → logrepo.EnsureTable → inventory.ListDir(cfg.MigrationsDir)
   → logrepo.List → plan.Build
   → status/plan: print table (+ warnings)
   → apply: refuse if blocked; else for each Action==apply:
-       MarkRunning → db.Exec(file SQL) → MarkSuccess | MarkFailed+stop
+       MarkRunning → cfg.DB.Exec(file SQL) → MarkSuccess | MarkFailed+stop
   → recovery: parse migration_id + required --note
        mark-done   → logrepo.MarkDone
        mark-failed → logrepo.MarkFailedManual
        note        → logrepo.SetNote
        allow-retry → logrepo.AllowRetry (EO only)
+```
+
+Harness (tests only — not production):
+
+```text
+sql.Open(harnessDSN) → sqlexec.Wrap → cfg.DB
 ```
 
 Thin main (not exercised by this tree):
@@ -54,18 +62,19 @@ cmd/mysql-migrate/main.go → os.Exit(cli.Run(cfg, os.Args[1:]))
 
 The **migrate CLI library** is a **non-interactive** operator tool. An
 **operator** (or thin main) invokes **`cli.Run(cfg, args)`** with a
-**Config** (DSN, migrations directory, program name, applied-by identity) and
-**args** without the program name. The CLI **dispatches** on the first token:
-**help** (`-h` / `--help` / empty+help), a **known subcommand** (`status`,
-`plan`, `apply`, `mark-done`, `mark-failed`, `note`, `allow-retry`), or
-**unknown** (usage error). Every command supports **help** that prints
+**Config** (`sqlexec.DB`, migrations directory, program name, applied-by
+identity) and **args** without the program name. The CLI **dispatches** on the
+first token: **help** (`-h` / `--help` / empty+help), a **known subcommand**
+(`status`, `plan`, `apply`, `mark-done`, `mark-failed`, `note`, `allow-retry`),
+or **unknown** (usage error). Every command supports **help** that prints
 **Usage** (using **ProgramName**) and exits **0**. Subcommands that talk to a
-DB require non-empty **cfg.DSN** and **cfg.MigrationsDir**. Missing either is a
-**usage** error (exit **2**). Unknown subcommands are usage errors (exit **2**)
-with an **Error** line on stderr. There are **no** `--local` / `--remote`
-flags — target selection is entirely via **Config**.
+DB require non-nil **cfg.DB** and non-empty **cfg.MigrationsDir**. Missing
+either is a **usage** error (exit **2**). Unknown subcommands are usage errors
+(exit **2**) with an **Error** line on stderr. There are **no**
+`--local` / `--remote` flags — target selection is entirely via **Config**.
+The library **never** calls `sql.Open` and Config has **no DSN field**.
 
-**Status** and **plan** are **read-mostly** operators: open DB with **cfg.DSN**,
+**Status** and **plan** are **read-mostly** operators: use **cfg.DB**,
 **ensure** the log table, **list** migration files from **cfg.MigrationsDir**,
 **list** log rows, **build** a plan via **plan.Build**, then **print** a table
 to **stdout**. **Status** prints **all** plan items (id, action/status,
@@ -118,7 +127,7 @@ tests/cli/                                   [Request{Args, DSN, MigrationsDir, 
 ├── unknown/
 │   └── subcommand/                          # bogus name → exit 2 + Error
 ├── usage/
-│   └── status-missing-dsn/                  # status with empty cfg.DSN → 2
+│   └── status-missing-db/                   # status with nil cfg.DB → 2
 ├── status/                                  # real status + fixture dir + DSN
 │   ├── empty-migrations/                    # empty dir → exit 0
 │   ├── all-pending/                         # fixtures, no logs → apply, exit 0
@@ -167,7 +176,7 @@ happy vs error variant.
 | `help/apply` | `apply -h` → exit 0; mentions `--to` |
 | `help/mark-done` | `mark-done -h` → exit 0; mentions `--note` |
 | `unknown/subcommand` | Unknown name → exit 2; stderr contains Error |
-| `usage/status-missing-dsn` | `status` with empty `cfg.DSN` → exit 2 |
+| `usage/status-missing-db` | `status` with nil `cfg.DB` → exit 2 |
 | `status/empty-migrations` | Empty migrations dir → exit 0 |
 | `status/all-pending` | Two fixtures, no logs → both **apply**, exit 0 |
 | `status/with-success-log` | First success → **skip**; second **apply**; exit 0 |
@@ -222,8 +231,9 @@ cli.Run(cfg, []string{"note",        id, "--note", "..."})
 cli.Run(cfg, []string{"allow-retry", id, "--note", "..."})
 ```
 
-No `--local` / `--remote`. Prefer **cfg only** for DSN and MigrationsDir
-(tests pass both on Config; do not rely on `MIGRATE_MIGRATIONS_DIR` env).
+No `--local` / `--remote`. Prefer **cfg only** for DB and MigrationsDir
+(harness injects `cfg.DB` via `sqlexec.Wrap`; do not rely on
+`MIGRATE_MIGRATIONS_DIR` env).
 
 ### Exit codes
 
@@ -231,7 +241,7 @@ No `--local` / `--remote`. Prefer **cfg only** for DSN and MigrationsDir
 |------|------|
 | Help / success status, plan, apply, or recovery | **0** |
 | Status/plan with `HasBlock`; apply refuse/exec fail; recovery biz error | **1** |
-| Usage, unknown, missing DSN/MigrationsDir/id/note | **2** |
+| Usage, unknown, missing DB/MigrationsDir/id/note | **2** |
 
 ### Apply output contract
 
@@ -255,14 +265,20 @@ No `--local` / `--remote`. Prefer **cfg only** for DSN and MigrationsDir
 ```go
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+
 	"github.com/xhd2015/mysql-migrate/cli"
 	"github.com/xhd2015/mysql-migrate/migrate"
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
 
 // Request drives one CLI library invocation via cli.Run(cfg, args).
@@ -274,9 +290,13 @@ type Request struct {
 	// When false, stdin is /dev/null (also non-blocking).
 	CloseStdin bool
 
+	// HarnessDSN is test-only: used by the harness to sql.Open + sqlexec.Wrap
+	// into cfg.DB. It is NEVER placed on migrate.Config (Config has no DSN).
+	// Empty HarnessDSN → cfg.DB left nil (usage path for DB subcommands).
+	DSN string // harness open string (legacy field name kept for leaf Setup)
+
 	// Config fields for migrate.Config (passed to cli.Run).
 	// Prefer cfg only — MigrationsDir is NOT injected via env by Run.
-	DSN           string
 	MigrationsDir string
 	ProgramName   string
 	AppliedBy     string
@@ -326,7 +346,12 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		req.Args = []string{}
 	}
 
-	cfg := buildConfig(req)
+	cfg, cleanup, err := buildConfig(t, req)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
 	stdout, stderr, code, dur, err := captureCLIRun(t, cfg, req.Args, req.CloseStdin)
 	if err != nil {
 		return nil, err
@@ -353,13 +378,36 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 	return resp, nil
 }
 
-func buildConfig(req *Request) migrate.Config {
-	return migrate.Config{
-		DSN:           req.DSN,
+// buildConfig maps Request → migrate.Config with cfg.DB from harness Wrap.
+// req.DSN is harness-only; empty means leave DB nil (usage tests).
+func buildConfig(t *testing.T, req *Request) (migrate.Config, func(), error) {
+	t.Helper()
+	cfg := migrate.Config{
 		MigrationsDir: req.MigrationsDir,
 		ProgramName:   req.ProgramName,
 		AppliedBy:     req.AppliedBy,
 	}
+	cleanup := func() {}
+	if strings.TrimSpace(req.DSN) == "" {
+		// Nil DB path (help / usage missing-db).
+		return cfg, cleanup, nil
+	}
+	raw, err := sql.Open("mysql", req.DSN)
+	if err != nil {
+		return cfg, cleanup, fmt.Errorf("harness sql.Open: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := raw.PingContext(ctx); err != nil {
+		_ = raw.Close()
+		return cfg, cleanup, fmt.Errorf("harness ping: %w", err)
+	}
+	db := sqlexec.Wrap(raw)
+	cfg.DB = db
+	cleanup = func() {
+		_ = db.Close()
+	}
+	return cfg, cleanup, nil
 }
 
 // captureCLIRun redirects os.Stdout/os.Stderr/os.Stdin, calls cli.Run, restores.

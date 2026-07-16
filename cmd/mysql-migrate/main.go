@@ -1,19 +1,25 @@
 // Command mysql-migrate is the operator binary for MySQL migrations.
 //
 // It parses global flags with less-flags, applies optional env fallbacks,
-// builds migrate.Config, and delegates subcommands to cli.Run.
+// opens MySQL when a DSN is provided, wraps it as sqlexec.DB, builds
+// migrate.Config, and delegates subcommands to cli.Run.
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	lessflags "github.com/xhd2015/less-flags"
 
 	"github.com/xhd2015/mysql-migrate/cli"
 	"github.com/xhd2015/mysql-migrate/migrate"
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
 
 const programName = "mysql-migrate"
@@ -63,10 +69,28 @@ func run(args []string) int {
 	}
 
 	cfg := migrate.Config{
-		DSN:           dsn,
 		MigrationsDir: dir,
 		ProgramName:   programName,
 	}
+
+	// Open + Wrap only when a DSN is available. Missing DSN leaves cfg.DB nil
+	// so cli reports usage for DB subcommands. Config never carries a DSN.
+	if strings.TrimSpace(dsn) != "" {
+		raw, err := sql.Open("mysql", dsn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: open DSN: %v\n", err)
+			return 1
+		}
+		defer raw.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := raw.PingContext(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: open DSN: %v\n", err)
+			return 1
+		}
+		cfg.DB = sqlexec.Wrap(raw)
+	}
+
 	return cli.Run(cfg, remain)
 }
 

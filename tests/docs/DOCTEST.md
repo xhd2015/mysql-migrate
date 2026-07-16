@@ -27,7 +27,9 @@ module root (next to `go.mod`). The README **documents**:
    `note`, `allow-retry`.
 5. **Environment** — optional fallbacks **`MIGRATE_MYSQL_DSN`** and
    **`MIGRATE_MYSQL_DIR`** when flags are omitted.
-6. **Running tests** — how to run **doctests** (`doctest vet` / `doctest test`)
+6. **Core DSN-free** — library **never opens a DSN**; binary edge uses
+   **`sqlexec`** Wrap into Config.DB.
+7. **Running tests** — how to run **doctests** (`doctest vet` / `doctest test`)
    and/or `go test` against this repo.
 
 This test tree is a **reader**: it **loads** `README.md` from the module root
@@ -53,15 +55,16 @@ tests/docs/                              [Request{RequiredPhrases}]
     ├── cli-usage/                       # --dsn, --dir, mysql-migrate usage
     ├── subcommands/                     # status plan apply mark-* note allow-retry
     ├── env-vars/                        # MIGRATE_MYSQL_DSN, MIGRATE_MYSQL_DIR
+    ├── core-dsn-free/                   # library never opens a DSN; sqlexec edge
     └── run-doctests/                    # doctest test / how to run suite
 ```
 
-Siblings are MECE over P7 README exit criteria (purpose, install, CLI flags,
-subcommands, env, doctest runbook). No CLI/DB behavior here (covered by
-`tests/cli` and `tests/cmd`).
+Siblings are MECE over README exit criteria (purpose, install, CLI flags,
+subcommands, env, core DSN-free, doctest runbook). No CLI/DB behavior here
+(covered by `tests/cli` and `tests/cmd`).
 
 **Significance order:** document = README (only surface) → section topic
-(purpose / install / flags / commands / env / test runbook).
+(purpose / install / flags / commands / env / architecture / test runbook).
 
 ## Test Case Index
 
@@ -72,7 +75,8 @@ subcommands, env, doctest runbook). No CLI/DB behavior here (covered by
 | 3 | `readme-section/cli-usage/` | README exists | documents `--dsn` and `--dir` |
 | 4 | `readme-section/subcommands/` | README exists | lists all seven subcommands |
 | 5 | `readme-section/env-vars/` | README exists | mentions `MIGRATE_MYSQL_DSN` and `MIGRATE_MYSQL_DIR` |
-| 6 | `readme-section/run-doctests/` | README exists | documents running `doctest test` (and suite location) |
+| 6 | `readme-section/core-dsn-free/` | README exists | documents core never opens a DSN + sqlexec |
+| 7 | `readme-section/run-doctests/` | README exists | documents running `doctest test` (and suite location) |
 
 ## How to Run
 

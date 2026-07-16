@@ -10,12 +10,11 @@
 //	1 — business failure (HasBlock on status/plan, apply refuse/fail, recovery biz error)
 //	2 — usage error, unknown command, or missing required config/flags
 //
-// Run never calls os.Exit.
+// Run never calls os.Exit. Run never calls sql.Open — DB comes from cfg.DB.
 package cli
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -23,25 +22,24 @@ import (
 	"text/tabwriter"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-
 	"github.com/xhd2015/mysql-migrate/migrate"
 	"github.com/xhd2015/mysql-migrate/migrate/inventory"
 	"github.com/xhd2015/mysql-migrate/migrate/logrepo"
 	"github.com/xhd2015/mysql-migrate/migrate/plan"
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
 
 // Exit codes locked by CLI tests.
 const (
 	ExitOK    = 0
-	ExitBiz   = 1 // HasBlock, apply failure, open/DB error, recovery logrepo/biz error
+	ExitBiz   = 1 // HasBlock, apply failure, recovery logrepo/biz error
 	ExitUsage = 2 // usage / unknown / missing flags or config
 )
 
 // Run handles argv without the program name.
 // Writes help / errors to os.Stdout and os.Stderr.
 // Reads nothing required from os.Stdin (must not block if stdin is closed).
-// Never calls os.Exit.
+// Never calls os.Exit. Never opens a DSN — uses cfg.DB only.
 func Run(cfg migrate.Config, args []string) int {
 	program := resolveProgramName(cfg.ProgramName)
 
@@ -100,7 +98,7 @@ func printRootUsage(w io.Writer, program string) {
 	fmt.Fprintln(w, "  allow-retry  Clear a failed exactly-once migration for retry")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Config (passed by the caller, not CLI flags):")
-	fmt.Fprintln(w, "  DSN            MySQL DSN (required for DB subcommands)")
+	fmt.Fprintln(w, "  DB            sqlexec.DB (required for DB subcommands)")
 	fmt.Fprintln(w, "  MigrationsDir  Directory of *.sql migration files")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Use \"<command> -h\" for subcommand help.")
@@ -115,9 +113,9 @@ func wantsHelp(args []string) bool {
 	return false
 }
 
-func requireDSN(cfg migrate.Config) int {
-	if strings.TrimSpace(cfg.DSN) == "" {
-		fmt.Fprintln(os.Stderr, "Error: missing DSN on config (cfg.DSN is empty)")
+func requireDB(cfg migrate.Config) int {
+	if cfg.DB == nil {
+		fmt.Fprintln(os.Stderr, "Error: missing DB on config (cfg.DB is nil)")
 		return ExitUsage
 	}
 	return ExitOK
@@ -131,35 +129,20 @@ func requireMigrationsDir(cfg migrate.Config) int {
 	return ExitOK
 }
 
-// openDB opens and pings MySQL with cfg.DSN. Caller must Close.
-func openDB(cfg migrate.Config) (*sql.DB, error) {
-	db, err := sql.Open("mysql", cfg.DSN)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
-}
-
 func runStatus(cfg migrate.Config, program string, args []string) int {
 	if wantsHelp(args) {
 		fmt.Fprintf(os.Stdout, "Usage: %s status\n", program)
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, "Show migration status for the configured database.")
 		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Uses cfg.DSN and cfg.MigrationsDir from Config (no target flags).")
+		fmt.Fprintln(os.Stdout, "Uses cfg.DB and cfg.MigrationsDir from Config (no target flags).")
 		return ExitOK
 	}
 	if hasUnknownFlags(args, nil) || len(nonFlagPositional(args)) > 0 {
 		fmt.Fprintf(os.Stderr, "Error: unexpected arguments for status: %s\n", strings.Join(args, " "))
 		return ExitUsage
 	}
-	if code := requireDSN(cfg); code != ExitOK {
+	if code := requireDB(cfg); code != ExitOK {
 		return code
 	}
 	if code := requireMigrationsDir(cfg); code != ExitOK {
@@ -174,14 +157,14 @@ func runPlan(cfg migrate.Config, program string, args []string) int {
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, "Show planned apply actions for the configured database.")
 		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Uses cfg.DSN and cfg.MigrationsDir from Config (no target flags).")
+		fmt.Fprintln(os.Stdout, "Uses cfg.DB and cfg.MigrationsDir from Config (no target flags).")
 		return ExitOK
 	}
 	if hasUnknownFlags(args, nil) || len(nonFlagPositional(args)) > 0 {
 		fmt.Fprintf(os.Stderr, "Error: unexpected arguments for plan: %s\n", strings.Join(args, " "))
 		return ExitUsage
 	}
-	if code := requireDSN(cfg); code != ExitOK {
+	if code := requireDB(cfg); code != ExitOK {
 		return code
 	}
 	if code := requireMigrationsDir(cfg); code != ExitOK {
@@ -190,20 +173,15 @@ func runPlan(cfg migrate.Config, program string, args []string) int {
 	return runStatusOrPlan(cfg, true /* planOnlyNonSkip */)
 }
 
-// runStatusOrPlan opens the DB, builds a plan from inventory + log, prints a
+// runStatusOrPlan uses cfg.DB, builds a plan from inventory + log, prints a
 // table, emits hash-mismatch warnings, and returns 1 if HasBlock else 0.
 // When onlyNonSkip is true (plan subcommand), skip rows are omitted from stdout.
+// Does not Close cfg.DB — the caller owns the connection.
 func runStatusOrPlan(cfg migrate.Config, onlyNonSkip bool) int {
-	db, err := openDB(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: open DSN: %v\n", err)
-		return ExitBiz
-	}
-	defer db.Close()
+	db := cfg.DB
 
-	if err := logrepo.EnsureTable(db); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: ensure migration log table: %v\n", err)
-		return ExitBiz
+	if code := ensureMigrationLog(db); code != ExitOK {
+		return code
 	}
 
 	files, err := inventory.ListDir(cfg.MigrationsDir)
@@ -288,10 +266,10 @@ func runApply(cfg migrate.Config, program string, args []string) int {
 		fmt.Fprintln(os.Stdout, "Flags:")
 		fmt.Fprintln(os.Stdout, "  --to <id>  Apply up to and including this migration_id")
 		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Uses cfg.DSN and cfg.MigrationsDir from Config (no target flags).")
+		fmt.Fprintln(os.Stdout, "Uses cfg.DB and cfg.MigrationsDir from Config (no target flags).")
 		return ExitOK
 	}
-	if code := requireDSN(cfg); code != ExitOK {
+	if code := requireDB(cfg); code != ExitOK {
 		return code
 	}
 	if code := requireMigrationsDir(cfg); code != ExitOK {
@@ -308,17 +286,12 @@ func runApply(cfg migrate.Config, program string, args []string) int {
 // doApply builds the same plan as status/plan, refuses when HasBlock, then
 // walks Action==apply items: MarkRunning → Exec SQL → MarkSuccess|MarkFailed.
 // --to stops after the named migration_id (inclusive). Progress + summary go to stdout.
+// Does not Close cfg.DB — the caller owns the connection.
 func doApply(cfg migrate.Config, toID string) int {
-	db, err := openDB(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: open DSN: %v\n", err)
-		return ExitBiz
-	}
-	defer db.Close()
+	db := cfg.DB
 
-	if err := logrepo.EnsureTable(db); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: ensure migration log table: %v\n", err)
-		return ExitBiz
+	if code := ensureMigrationLog(db); code != ExitOK {
+		return code
 	}
 
 	files, err := inventory.ListDir(cfg.MigrationsDir)
@@ -446,11 +419,11 @@ func printApplySummary(applied, failed, pending int) {
 	fmt.Fprintf(os.Stdout, "%d applied, %d failed, %d pending\n", applied, failed, pending)
 }
 
-// execMigrationSQL runs the full migration file body (multiStatements enabled on DSN).
-func execMigrationSQL(db *sql.DB, sqlText string) error {
+// execMigrationSQL runs the full migration file body (multiStatements enabled on the caller's DSN).
+func execMigrationSQL(db sqlexec.DB, sqlText string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	_, err := db.ExecContext(ctx, sqlText)
+	_, err := db.Exec(ctx, sqlText)
 	return err
 }
 
@@ -473,31 +446,25 @@ func runRecovery(cfg migrate.Config, program, cmd string, args []string) int {
 		fmt.Fprintln(os.Stdout, "Flags:")
 		fmt.Fprintln(os.Stdout, "  --note string   Required operator note")
 		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Uses cfg.DSN from Config (no target flags).")
+		fmt.Fprintln(os.Stdout, "Uses cfg.DB from Config (no target flags).")
 		return ExitOK
 	}
 
-	// Parse id/note before DSN so usage errors (missing note/id) work offline.
+	// Parse id/note before DB so usage errors (missing note/id) work offline.
 	id, note, err := parseIDAndNote(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return ExitUsage
 	}
 
-	if code := requireDSN(cfg); code != ExitOK {
+	if code := requireDB(cfg); code != ExitOK {
 		return code
 	}
 
-	db, err := openDB(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: open DSN: %v\n", err)
-		return ExitBiz
-	}
-	defer db.Close()
+	db := cfg.DB
 
-	if err := logrepo.EnsureTable(db); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: ensure migration log table: %v\n", err)
-		return ExitBiz
+	if code := ensureMigrationLog(db); code != ExitOK {
+		return code
 	}
 
 	var opErr error
@@ -517,6 +484,19 @@ func runRecovery(cfg migrate.Config, program, cmd string, args []string) int {
 	if opErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", opErr)
 		return ExitBiz
+	}
+	return ExitOK
+}
+
+// ensureMigrationLog creates t_sql_migration_log if missing and prints when created.
+func ensureMigrationLog(db sqlexec.DB) int {
+	created, err := logrepo.EnsureTable(db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: ensure migration log table: %v\n", err)
+		return ExitBiz
+	}
+	if created {
+		fmt.Fprintln(os.Stdout, "ensured: t_sql_migration_log (created)")
 	}
 	return ExitOK
 }

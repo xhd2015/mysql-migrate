@@ -31,8 +31,9 @@ tests/docs Run -> os.ReadFile(README.md) -> phrase Assert per section leaf
 
 ## Context
 
-- Locked README topics (P7): purpose, install, CLI `--dsn`/`--dir`, seven
-  subcommands, `MIGRATE_MYSQL_*` env vars, how to run doctests.
+- Locked README topics: purpose, install, CLI `--dsn`/`--dir`, seven
+  subcommands, `MIGRATE_MYSQL_*` env vars, core DSN-free / `sqlexec`, how to
+  run doctests.
 - Phrase checks are case-sensitive substrings (implementer may use any
   surrounding prose as long as the tokens appear).
 - Optional root DOCTEST index is out of scope for this tree (implementer).

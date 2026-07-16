@@ -8,7 +8,7 @@ operator -> cli.Run(cfg, args) -> stdout/stderr + exit code (never os.Exit)
 
 # help / usage (offline)
 args -h | <cmd> -h -> Usage with ProgramName (exit 0)
-unknown cmd | empty cfg.DSN for DB ops -> exit 2
+unknown cmd | nil cfg.DB for DB ops -> exit 2
 
 # status / plan (local DB + fixture migrations dir on Config)
 cfg{DSN, MigrationsDir} + status|plan
@@ -44,8 +44,10 @@ mark-done|mark-failed|note|allow-retry <id> --note "..."
 - Full command set (root help): `status`, `plan`, `apply`, `mark-done`,
   `mark-failed`, `note`, `allow-retry`.
 - **No** `--local` / `--remote` flags anywhere.
-- Config: tests set `DSN` + `MigrationsDir` on Request for DB leaves
-  (prefer cfg only; harness does not set `MIGRATE_MIGRATIONS_DIR`).
+- Config: tests set harness `DSN` (open string only) + `MigrationsDir` on
+  Request for DB leaves. Root `Run` does `sql.Open` + `sqlexec.Wrap` into
+  `cfg.DB`. Empty harness DSN → nil `cfg.DB` (usage leaves). Prefer cfg only;
+  harness does not set `MIGRATE_MIGRATIONS_DIR`.
 - Module root from this DOCTEST root: `DOCTEST_ROOT/..`.
 - Status/plan/apply/recovery DB leaves need MySQL (default `localhost:9306` /
   `lifespan_db`). Harness **skips** when DSN not reachable (no podman start).
@@ -59,11 +61,12 @@ mark-done|mark-failed|note|allow-retry <id> --note "..."
 
 ## Steps
 
-1. Root Setup defaults ProgramName/AppliedBy; leaves set Args, DSN,
-   MigrationsDir, fixtures, seeds, FollowUpArgs.
-2. Root `Run` builds `migrate.Config`, redirects stdio, calls `cli.Run`,
-   restores, returns captured text + exit code + duration; on primary exit 0
-   with `FollowUpArgs`, runs a second `cli.Run` with the same Config.
+1. Root Setup defaults ProgramName/AppliedBy; leaves set Args, harness DSN
+   (open string), MigrationsDir, fixtures, seeds, FollowUpArgs.
+2. Root `Run` builds `migrate.Config` with `cfg.DB = sqlexec.Wrap(...)` when
+   harness DSN is set, redirects stdio, calls `cli.Run`, restores, returns
+   captured text + exit code + duration; on primary exit 0 with
+   `FollowUpArgs`, runs a second `cli.Run` with the same Config.
 3. Leaf Assert checks exit code, stdout/stderr tokens, and for apply/recovery
    leaves: log status/note + optional table existence side effects.
 
@@ -131,13 +134,14 @@ func harnessDSN() string {
 	return defaultLocalDSN
 }
 
-// fillConfigForDB ensures MySQL is up and fills req.DSN when empty.
+// fillConfigForDB ensures MySQL is up and fills harness req.DSN when empty.
+// Root Run wraps that DSN into cfg.DB via sqlexec.Wrap (Config has no DSN field).
 // Leaves still set MigrationsDir themselves.
 func fillConfigForDB(t *testing.T, req *Request) {
 	t.Helper()
 	ensureMySQL(t)
 	if strings.TrimSpace(req.DSN) == "" {
-		req.DSN = harnessDSN()
+		req.DSN = harnessDSN() // harness-only open string → Wrap in buildConfig
 	}
 	if req.ProgramName == "" {
 		req.ProgramName = "mysql-migrate"
@@ -398,7 +402,7 @@ func requireFollowUpExit(t *testing.T, resp *Response, want int) {
 // seedSuccess upserts running→success with hash and duration; optional note via SetNote.
 func seedSuccess(t *testing.T, db *sql.DB, migrationID string, exactlyOnce bool, hash string, durationMS int, note string) {
 	t.Helper()
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	deleteLogIDs(t, db, migrationID)
@@ -419,7 +423,7 @@ func seedSuccess(t *testing.T, db *sql.DB, migrationID string, exactlyOnce bool,
 // seedFailed upserts running→failed with hash and error message.
 func seedFailed(t *testing.T, db *sql.DB, migrationID string, exactlyOnce bool, hash string, durationMS int, errMsg string) {
 	t.Helper()
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	deleteLogIDs(t, db, migrationID)

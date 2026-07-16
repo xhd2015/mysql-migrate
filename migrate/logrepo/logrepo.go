@@ -8,7 +8,33 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
 )
+
+// asDB normalizes the DB handle to sqlexec.DB.
+// Preferred: sqlexec.DB (via sqlexec.Wrap). Also accepts *sql.DB so sealed
+// test harnesses that still open MySQL with database/sql continue to compile
+// while the product surface is sqlexec-first.
+func asDB(db any) (sqlexec.DB, error) {
+	if db == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	switch v := db.(type) {
+	case sqlexec.DB:
+		if v == nil {
+			return nil, fmt.Errorf("nil db")
+		}
+		return v, nil
+	case *sql.DB:
+		if v == nil {
+			return nil, fmt.Errorf("nil db")
+		}
+		return sqlexec.Wrap(v), nil
+	default:
+		return nil, fmt.Errorf("unsupported db type %T (want sqlexec.DB or *sql.DB)", db)
+	}
+}
 
 // Row maps one t_sql_migration_log row for callers and plan.LogRow conversion.
 type Row struct {
@@ -22,6 +48,9 @@ type Row struct {
 	AppliedBy     string
 }
 
+// createTableSQL is the bootstrap DDL for t_sql_migration_log.
+// Keep in sync with consumer migration files such as:
+//   2026-07-15-01-create-t-sql-migration-log.sql
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS t_sql_migration_log (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -51,28 +80,53 @@ func withTimeout() (context.Context, context.CancelFunc) {
 }
 
 // EnsureTable creates t_sql_migration_log if missing (IF NOT EXISTS). Idempotent.
-func EnsureTable(db *sql.DB) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+// created is true when the table did not exist in the current schema before this call.
+//
+// Callers (CLI status/plan/apply/recovery) should print a line when created is true, e.g.:
+//
+//	ensured: t_sql_migration_log (created)
+func EnsureTable(db any) (created bool, err error) {
+	sdb, err := asDB(db)
+	if err != nil {
+		return false, err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	_, err := db.ExecContext(ctx, createTableSQL)
+
+	existed, err := migrationLogTableExists(ctx, sdb)
 	if err != nil {
-		return fmt.Errorf("ensure t_sql_migration_log: %w", err)
+		return false, fmt.Errorf("ensure t_sql_migration_log: check exists: %w", err)
 	}
-	return nil
+
+	if _, err := sdb.Exec(ctx, createTableSQL); err != nil {
+		return false, fmt.Errorf("ensure t_sql_migration_log: %w", err)
+	}
+	return !existed, nil
+}
+
+// migrationLogTableExists reports whether t_sql_migration_log is present in DATABASE().
+func migrationLogTableExists(ctx context.Context, db sqlexec.DB) (bool, error) {
+	var n int
+	err := db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't_sql_migration_log'
+	`).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // List returns all log rows.
-func List(db *sql.DB) ([]Row, error) {
-	if db == nil {
-		return nil, fmt.Errorf("nil db")
+func List(db any) ([]Row, error) {
+	sdb, err := asDB(db)
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
 	q := `SELECT` + rowSelectCols + ` FROM t_sql_migration_log ORDER BY migration_id`
-	rows, err := db.QueryContext(ctx, q)
+	rows, err := sdb.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("list t_sql_migration_log: %w", err)
 	}
@@ -93,14 +147,15 @@ func List(db *sql.DB) ([]Row, error) {
 }
 
 // Get returns one row by migration_id. ok is false when not found.
-func Get(db *sql.DB, migrationID string) (Row, bool, error) {
-	if db == nil {
-		return Row{}, false, fmt.Errorf("nil db")
+func Get(db any, migrationID string) (Row, bool, error) {
+	sdb, err := asDB(db)
+	if err != nil {
+		return Row{}, false, err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
 	q := `SELECT` + rowSelectCols + ` FROM t_sql_migration_log WHERE migration_id = ?`
-	row := db.QueryRowContext(ctx, q, migrationID)
+	row := sdb.QueryRow(ctx, q, migrationID)
 	r, err := scanRow(row)
 	if err == sql.ErrNoRows {
 		return Row{}, false, nil
@@ -113,9 +168,10 @@ func Get(db *sql.DB, migrationID string) (Row, bool, error) {
 
 // MarkRunning upserts a row as status=running for migration_id, storing
 // exactly_once, content hash, and applied_by. Prefer ON DUPLICATE KEY UPDATE.
-func MarkRunning(db *sql.DB, migrationID string, exactlyOnce bool, contentSHA256 string, appliedBy string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func MarkRunning(db any, migrationID string, exactlyOnce bool, contentSHA256 string, appliedBy string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	if migrationID == "" {
 		return fmt.Errorf("empty migration_id")
@@ -128,7 +184,7 @@ func MarkRunning(db *sql.DB, migrationID string, exactlyOnce bool, contentSHA256
 	}
 	// Upsert: unique on migration_id. On conflict, refresh lifecycle fields
 	// and leave status as running for a new attempt.
-	_, err := db.ExecContext(ctx, `
+	_, err = sdb.Exec(ctx, `
 		INSERT INTO t_sql_migration_log (
 			migration_id, status, exactly_once, content_sha256, applied_by,
 			started_at, finished_at, duration_ms, error_message
@@ -150,13 +206,14 @@ func MarkRunning(db *sql.DB, migrationID string, exactlyOnce bool, contentSHA256
 }
 
 // MarkSuccess sets status=success and records duration_ms / finished_at.
-func MarkSuccess(db *sql.DB, migrationID string, durationMS int) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func MarkSuccess(db any, migrationID string, durationMS int) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET status = 'success',
 		    duration_ms = ?,
@@ -171,13 +228,14 @@ func MarkSuccess(db *sql.DB, migrationID string, durationMS int) error {
 }
 
 // MarkFailed sets status=failed with duration and error_message.
-func MarkFailed(db *sql.DB, migrationID string, durationMS int, errMsg string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func MarkFailed(db any, migrationID string, durationMS int, errMsg string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET status = 'failed',
 		    duration_ms = ?,
@@ -192,16 +250,17 @@ func MarkFailed(db *sql.DB, migrationID string, durationMS int, errMsg string) e
 }
 
 // MarkDone forces status=success with a required operator note.
-func MarkDone(db *sql.DB, migrationID string, note string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func MarkDone(db any, migrationID string, note string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	if err := requireNote(note); err != nil {
 		return err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET status = 'success',
 		    note = ?,
@@ -215,16 +274,17 @@ func MarkDone(db *sql.DB, migrationID string, note string) error {
 }
 
 // MarkFailedManual forces status=failed with a required operator note.
-func MarkFailedManual(db *sql.DB, migrationID string, note string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func MarkFailedManual(db any, migrationID string, note string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	if err := requireNote(note); err != nil {
 		return err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET status = 'failed',
 		    note = ?,
@@ -238,13 +298,14 @@ func MarkFailedManual(db *sql.DB, migrationID string, note string) error {
 }
 
 // SetNote updates note without changing status.
-func SetNote(db *sql.DB, migrationID string, note string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func SetNote(db any, migrationID string, note string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET note = ?
 		WHERE migration_id = ?
@@ -257,14 +318,15 @@ func SetNote(db *sql.DB, migrationID string, note string) error {
 
 // AllowRetry sets status=pending + note for an exactly-once failed row so plan
 // can re-apply. Non-exactly-once rows return an error. Note is required.
-func AllowRetry(db *sql.DB, migrationID string, note string) error {
-	if db == nil {
-		return fmt.Errorf("nil db")
+func AllowRetry(db any, migrationID string, note string) error {
+	sdb, err := asDB(db)
+	if err != nil {
+		return err
 	}
 	if err := requireNote(note); err != nil {
 		return err
 	}
-	row, ok, err := Get(db, migrationID)
+	row, ok, err := Get(sdb, migrationID)
 	if err != nil {
 		return err
 	}
@@ -276,7 +338,7 @@ func AllowRetry(db *sql.DB, migrationID string, note string) error {
 	}
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := db.ExecContext(ctx, `
+	res, err := sdb.Exec(ctx, `
 		UPDATE t_sql_migration_log
 		SET status = 'pending',
 		    note = ?
@@ -295,7 +357,7 @@ func requireNote(note string) error {
 	return nil
 }
 
-func requireRowsAffected(res sql.Result, migrationID, op string) error {
+func requireRowsAffected(res sqlexec.Result, migrationID, op string) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		// Some drivers may not report rows affected; treat as success.

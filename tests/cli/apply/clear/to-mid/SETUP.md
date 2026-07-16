@@ -46,7 +46,7 @@ func Setup(t *testing.T, req *Request) error {
 		deleteLogIDs(t, db, idA, idB, idC)
 		_ = db.Close()
 	})
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	dropTables(t, db, tblA, tblB, tblC)

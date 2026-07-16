@@ -1,12 +1,14 @@
-# mysql-migrate — cmd binary `cmd/mysql-migrate` (P6)
+# mysql-migrate — cmd binary `cmd/mysql-migrate` (P2 edge)
 
 Thin main for the operator tool. Parses **global** flags with **less-flags**,
-builds `migrate.Config`, and delegates to **`cli.Run(cfg, remainArgs)`**.
-Classic RED until implementer wires main beyond the empty stub.
+**opens MySQL only at the process edge** (`sql.Open` → `Ping` →
+`sqlexec.Wrap`), builds **DSN-free** `migrate.Config{DB, MigrationsDir,
+ProgramName}`, and delegates to **`cli.Run(cfg, remainArgs)`**.
 
 Standalone doctest root under `tests/cmd/` (does not inherit `tests/cli/`).
-CLI library behavior is sealed under `tests/cli/`; this tree only locks the
-**binary entry surface**: global flags, env fallbacks, help, and hand-off.
+CLI library behavior is sealed under `tests/cli/`; this tree locks the
+**binary entry surface**: global flags, env fallbacks, help, edge open/Wrap,
+and hand-off. Core `migrate.Config` has **no DSN field**.
 
 Target:
 
@@ -15,7 +17,7 @@ go run ./cmd/mysql-migrate [global flags] <command> [args]
 # or built binary: mysql-migrate …
 ```
 
-Implementer surface (suggested):
+Implementer surface (edge wiring):
 
 ```go
 // cmd/mysql-migrate
@@ -23,7 +25,8 @@ func main() { os.Exit(run(os.Args[1:])) }
 
 // less-flags: --dsn, --dir (-h/--help), StopOnFirstArg
 // empty remain / help → print root usage, exit 0
-// else: Config{DSN, MigrationsDir, ProgramName} → cli.Run(cfg, remain)
+// when dsn set: sql.Open → Ping → cfg.DB = sqlexec.Wrap(raw)
+// Config{DB, MigrationsDir, ProgramName} — no DSN field → cli.Run(cfg, remain)
 ```
 
 - Global flags: `--dsn`, `--dir` (migrations directory).
@@ -31,35 +34,42 @@ func main() { os.Exit(run(os.Args[1:])) }
   (flag wins when both set).
 - Empty argv → **help, exit 0** (unlike bare `cli.Run` with empty args).
 - Subcommand help: remaining args include e.g. `status -h` → `cli.Run` help.
-- Missing DSN for DB subcommands (no flag, no env) → non-zero usage (exit **2**).
+- Missing DSN for DB subcommands (no flag, no env) → `cfg.DB` stays nil →
+  usage exit **2** (cli requireDB).
+- With DSN: binary opens + Wrap; status/apply use `cfg.DB` only.
 
 # DSN (Domain Specific Notion)
 
 The **mysql-migrate binary** is a thin **operator front door**. An **operator**
 runs the process with **argv** (and optional **environment**). The binary
 **parses global flags** (`--dsn`, `--dir`) with **less-flags**, applies **env
-fallbacks** when a flag is omitted, then **builds Config** (DSN, MigrationsDir,
-ProgramName=`mysql-migrate`) and **calls `cli.Run`** with the remaining
-subcommand args.
+fallbacks** when a flag is omitted, then at the **process edge** may
+**`sql.Open` the DSN**, **Ping**, and **`sqlexec.Wrap`** into **`cfg.DB`**.
+**`migrate.Config` never carries a DSN string** — only `DB`, MigrationsDir,
+and ProgramName=`mysql-migrate`. Remaining subcommand args go to
+**`cli.Run`**.
 
 **Help** at the binary root (`-h` / `--help`, or **empty args**) prints
 **Usage** listing subcommands and global flags, then exits **0** without
-requiring DSN. **Subcommand help** (e.g. `status -h`) is handled after
+opening MySQL. **Subcommand help** (e.g. `status -h`) is handled after
 global parse by **`cli.Run`**, also exit **0**.
 
-**Usage errors** at the config boundary (e.g. `apply` with no DSN from flag or
-env) surface as non-zero exit (**2**) with an **Error** about missing DSN —
-without opening MySQL.
+**Usage errors** when a DB subcommand runs with no DSN from flag or env leave
+**`cfg.DB` nil**; **`cli.Run`** reports a usage **Error** (missing DB) and
+exit **2** — without opening MySQL.
 
-**Apply** (and other DB commands) open the DSN, use the migrations **dir**, and
-follow the sealed **`cli.Run`** contracts (progress, log rows, exit codes).
-This tree exercises one happy **apply** path through the binary flags to prove
-wiring end-to-end when MySQL is available; it does not re-seal full CLI
-coverage.
+**Status / apply** with `--dsn` + `--dir` open the DSN at the edge, Wrap into
+Config, ensure the migration log table (print
+`ensured: t_sql_migration_log (created)` when first created), and follow the
+sealed **`cli.Run`** contracts. This tree exercises **status** and **apply**
+happy paths through the binary to prove Wrap wiring; it does not re-seal the
+full CLI matrix.
 
 Tests **build** `./cmd/mysql-migrate` once per `doctest test` session (flock +
 ready marker under `$TMPDIR`), **exec** the binary with controlled env (strip
 ambient `MIGRATE_MYSQL_*` by default), and assert exit codes + stdout/stderr.
+MySQL-touching leaves share a session **exclusive flock** so ensure-created
+can safely drop/recreate `t_sql_migration_log` without racing sibling leaves.
 
 ## Version
 
@@ -74,14 +84,19 @@ tests/cmd/                                   [Request{Args, Env, ClearMigrateEnv
 │   ├── root/                                # -h → Usage lists commands + --dsn/--dir
 │   ├── empty-args/                          # no args → help exit 0 (binary rule)
 │   └── status/                              # status -h via binary → Usage status
-├── usage/
-│   └── apply-missing-dsn/                   # apply, no --dsn, no env → exit 2
+├── usage/                                   # offline, exit 2 (nil cfg.DB)
+│   ├── apply-missing-dsn/                   # apply, no --dsn, no env → exit 2
+│   └── status-missing-dsn/                  # status, no --dsn, no env → exit 2
+├── status/                                  # --dsn edge open + Wrap → cli status
+│   ├── one-pending/                         # one file → status table, action apply
+│   └── ensure-created/                      # missing log table → ensured print
 └── apply/
     └── one-create-table/                    # --dsn + --dir apply; skip if MySQL down
 ```
 
-**Significance order:** dispatch class (help | usage | apply) → help variant
-(root / empty / subcommand) → config source (missing vs flags) → fixture apply.
+**Significance order:** dispatch class (help | usage | status | apply) →
+variant (help form / missing-DSN subcommand / status fixture / ensure) →
+fixture details.
 
 ## Test Index
 
@@ -90,25 +105,25 @@ tests/cmd/                                   [Request{Args, Env, ClearMigrateEnv
 | `help/root` | `-h` → exit 0; Usage lists all subcommands; mentions `--dsn` and `--dir` |
 | `help/empty-args` | no args → exit 0; Usage (same root help contract) |
 | `help/status` | `status -h` → exit 0; Usage mentions `status`; no `--local`/`--remote` |
-| `usage/apply-missing-dsn` | `apply --dir <tmp>` without DSN flag/env → exit **2**; Error mentions dsn |
+| `usage/apply-missing-dsn` | `apply --dir <tmp>` without DSN flag/env → exit **2**; Error mentions missing/DB/dsn |
+| `usage/status-missing-dsn` | `status --dir <tmp>` without DSN flag/env → exit **2**; Error mentions missing/DB/dsn |
+| `status/one-pending` | `--dsn` + `--dir` + `status` one pending file → exit **0**, table + apply; skip if MySQL down |
+| `status/ensure-created` | drop log table then `--dsn` status → stdout has `ensured: t_sql_migration_log (created)`; skip if MySQL down |
 | `apply/one-create-table` | `--dsn` + `--dir` + `apply` one CREATE TABLE → exit **0**, log success; skip if MySQL unreachable |
 
 ## How to Run
 
 ```sh
 cd /Users/xhd2015/Projects/xhd2015/mysql-migrate
-# optional for apply leaf:
+# optional for DB leaves:
 # export MIGRATE_MYSQL_DSN='user:pass@tcp(host:port)/db?multiStatements=true&...'
 doctest vet ./tests/cmd
 doctest test ./tests/cmd
 ```
 
-Offline leaves: all `help/*` and `usage/apply-missing-dsn` (no MySQL).
-`apply/one-create-table` **skips** when the harness DSN is not reachable.
-
-Classic TDD: `cmd/mysql-migrate` is an empty `main` until implementer lands
-less-flags + Config + `cli.Run`. Leaves must fail (empty output / wrong exit)
-until the binary wires correctly.
+Offline leaves: all `help/*` and `usage/*` (no MySQL).
+DB leaves under `status/*` and `apply/*` **skip** when the harness DSN is
+not reachable.
 
 ### Binary surface (locked)
 
@@ -117,7 +132,15 @@ mysql-migrate -h
 mysql-migrate                          # empty → help exit 0
 mysql-migrate status -h
 mysql-migrate --dir <path> apply       # missing DSN → exit 2
+mysql-migrate --dir <path> status      # missing DSN → exit 2
+mysql-migrate --dsn <dsn> --dir <path> status
 mysql-migrate --dsn <dsn> --dir <path> apply
+```
+
+Edge open path (when DSN present):
+
+```text
+--dsn/--dir → sql.Open → Ping → sqlexec.Wrap → migrate.Config{DB, …} → cli.Run
 ```
 
 Env (optional, flag overrides):
@@ -132,8 +155,8 @@ MIGRATE_MYSQL_DIR
 | Case | Exit |
 |------|------|
 | Root help / empty args / subcommand help | **0** |
-| Apply success | **0** |
-| Missing DSN (usage) | **2** |
+| Status / apply success | **0** |
+| Missing DSN (nil cfg.DB usage) | **2** |
 
 ```go
 import (

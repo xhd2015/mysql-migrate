@@ -35,7 +35,7 @@ func Setup(t *testing.T, req *Request) error {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()
 	})
-	if err := logrepo.EnsureTable(db); err != nil {
+	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)
 	}
 	seedFailed(t, db, id, false /* exactlyOnce */, hash, 12, "non-eo failed seed")
