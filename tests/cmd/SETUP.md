@@ -21,14 +21,14 @@ empty args | -h -> Usage (commands + --dsn/--dir) -> exit 0
 - Library: `cli.Run` never `sql.Open`; requires non-nil `cfg.DB` for DB cmds.
 - Global flags (less-flags): `--dsn`, `--dir`; help `-h` / `--help`.
 - Env fallbacks: `MIGRATE_MYSQL_DSN`, `MIGRATE_MYSQL_DIR` (optional; flag wins).
-- Session cache: `$TMPDIR/mysql-migrate-cmd-doctest-<DOCTEST_SESSION_ID>/`
-  holds built binary + lock/ready markers (shared across parallel leaves).
-- MySQL-touching leaves acquire session `mysql-exclusive.lock` so
+- Process-local binary/cache via in-memory mutex (one-process suite; not in-memory mutex)
+  holds built binary + lock/ready markers (shared across leaves in one process).
+- MySQL-touching leaves acquire in-process `mysqlExclusiveMu` so
   `status/ensure-created` can drop `t_sql_migration_log` without racing
   sibling DB leaves in this tree.
 - Default `ClearMigrateEnv=true` so ambient migrate env does not leak into
   missing-DSN leaves.
-- Module root from this DOCTEST root: `DOCTEST_ROOT/../..` (`tests/cmd` → repo).
+- Module root from this DOCTEST root: `d.DOCTEST_ROOT/../..` (`tests/cmd` → repo).
 - DB leaves need MySQL (default `localhost:9306` / `lifespan_db`); skip when
   unreachable. Harness does **not** start containers.
 - Apply DSN should allow multi-statement SQL (`multiStatements=true`).
@@ -43,11 +43,12 @@ empty args | -h -> Usage (commands + --dsn/--dir) -> exit 0
 ## Context
 
 - P2 edge contract: `--dsn`/`--dir` → Open → Wrap → `cli.Run`; no DSN on Config.
-- Prefer flock session build over per-leaf `go run` for parallel leaves.
+- Prefer process-local in-memory once build over per-leaf `go run` for parallel leaves.
 - Do not re-test full CLI matrix here (`tests/cli/` already seals it).
 
 ```go
 import (
+	"sync"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -56,20 +57,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/xhd2015/mysql-migrate/migrate/logrepo"
+	"github.com/xhd2015/doctest/session"
 )
 
 // defaultLocalDSN is the lifelog/local-dev MySQL DSN used when MIGRATE_MYSQL_DSN
 // is unset for harness-side asserts / apply leaf skip detection.
 const defaultLocalDSN = "lf:Xpassword@tcp(localhost:9306)/lifespan_db?charset=utf8mb4&parseTime=True&multiStatements=true"
 
-func Setup(t *testing.T, req *Request) error {
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	if req.Args == nil {
 		req.Args = []string{}
 	}
@@ -77,7 +78,7 @@ func Setup(t *testing.T, req *Request) error {
 	// (Leaves that need env injection set ClearMigrateEnv and Env themselves;
 	// default true so missing-DSN tests stay offline-stable.)
 	req.ClearMigrateEnv = true
-	req.Bin = buildBinaryOnce(t)
+	req.Bin = buildBinaryOnce(t, d)
 	return nil
 }
 
@@ -91,10 +92,10 @@ func harnessDSN() string {
 }
 
 // sessionSlugPrefix returns a short kebab-safe prefix for migration slugs.
-func sessionSlugPrefix() string {
+func sessionSlugPrefix(d *session.Doctest) string {
 	var b strings.Builder
 	b.WriteString("p6")
-	for _, r := range DOCTEST_SESSION_ID {
+	for _, r := range d.DOCTEST_SESSION_ID {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			b.WriteRune(r)
@@ -111,12 +112,12 @@ func sessionSlugPrefix() string {
 	return b.String()
 }
 
-func fixtureSlug(leaf, part string) string {
-	return sessionSlugPrefix() + "-" + leaf + "-" + part
+func fixtureSlug(d *session.Doctest, leaf, part string) string {
+	return sessionSlugPrefix(d) + "-" + leaf + "-" + part
 }
 
-func fixtureTable(leaf, part string) string {
-	return "t_cmd_" + sessionSlugPrefix() + "_" + leaf + "_" + part
+func fixtureTable(d *session.Doctest, leaf, part string) string {
+	return "t_cmd_" + sessionSlugPrefix(d) + "_" + leaf + "_" + part
 }
 
 func simpleFileName(seq int, slug string) string {
@@ -148,54 +149,43 @@ func contentSHA256(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ensureMySQL pings harness DSN; skips the leaf when MySQL is unavailable.
-func ensureMySQL(t *testing.T) {
-	t.Helper()
-	cache := sessionCacheDir()
-	lock := filepath.Join(cache, "mysql.lock")
-	ready := filepath.Join(cache, "mysql.ready")
-	dsn := harnessDSN()
+// Process-local MySQL reachability memo (one-process; not session flock).
+var (
+	mysqlExclusiveMu sync.Mutex
+	ensureMySQLMu  sync.Mutex
+	ensureMySQLDid bool
+	ensureMySQLErr error
+)
 
-	var pingErr error
-	err := withFileLock(t, lock, func() error {
-		if _, statErr := os.Stat(ready); statErr == nil {
-			db, err := sql.Open("mysql", dsn)
-			if err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				pingErr = db.PingContext(ctx)
-				cancel()
-				db.Close()
-				if pingErr == nil {
-					return nil
-				}
-				_ = os.Remove(ready)
-			}
+func ensureMySQL(t *testing.T, d *session.Doctest) {
+	t.Helper()
+	ensureMySQLMu.Lock()
+	defer ensureMySQLMu.Unlock()
+	if ensureMySQLDid {
+		if ensureMySQLErr != nil {
+			t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 		}
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			pingErr = err
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		pingErr = db.PingContext(ctx)
-		cancel()
-		db.Close()
-		if pingErr == nil {
-			return os.WriteFile(ready, []byte("ok"), 0o644)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ensureMySQL lock: %v", err)
+		return
 	}
-	if pingErr != nil {
-		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", pingErr)
+	ensureMySQLDid = true
+	dsn := harnessDSN()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		ensureMySQLErr = err
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ensureMySQLErr = db.PingContext(ctx)
+	cancel()
+	_ = db.Close()
+	if ensureMySQLErr != nil {
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 	}
 }
 
-func openLocalDB(t *testing.T) *sql.DB {
+func openLocalDB(t *testing.T, d *session.Doctest) *sql.DB {
 	t.Helper()
-	ensureMySQL(t)
+	ensureMySQL(t, d)
 	db, err := sql.Open("mysql", harnessDSN())
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
@@ -314,47 +304,20 @@ func stdoutHasApplyProgress(stdout, migrationID, token string) bool {
 	return strings.Contains(stdout, token)
 }
 
-// mysqlExclusiveFD holds the flock fd for the duration of a MySQL-touching
-// leaf (Setup → Run → Assert). File lock serializes sibling packages.
-var mysqlExclusiveFD *os.File
-
-// acquireMySQLExclusive takes session mysql-exclusive.lock (LOCK_EX) and
-// releases on t.Cleanup. Call from every leaf Setup that touches the shared
-// harness MySQL (status/apply DB leaves).
+// acquireMySQLExclusive serialises MySQL-touching leaves in-process.
+// Call from every leaf Setup that touches the shared harness MySQL.
 func acquireMySQLExclusive(t *testing.T) {
 	t.Helper()
-	if mysqlExclusiveFD != nil {
-		return
-	}
-	cache := sessionCacheDir()
-	if err := os.MkdirAll(cache, 0o755); err != nil {
-		t.Fatalf("mysql exclusive cache: %v", err)
-	}
-	lockPath := filepath.Join(cache, "mysql-exclusive.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("open mysql-exclusive.lock: %v", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		t.Fatalf("flock mysql-exclusive.lock: %v", err)
-	}
-	mysqlExclusiveFD = f
-	t.Cleanup(func() {
-		if mysqlExclusiveFD == nil {
-			return
-		}
-		_ = syscall.Flock(int(mysqlExclusiveFD.Fd()), syscall.LOCK_UN)
-		_ = mysqlExclusiveFD.Close()
-		mysqlExclusiveFD = nil
-	})
+	mysqlExclusiveMu.Lock()
+	t.Cleanup(func() { mysqlExclusiveMu.Unlock() })
 }
+
 
 // dropMigrationLogTable drops t_sql_migration_log on the harness DB.
 // Caller must hold acquireMySQLExclusive so sibling leaves do not race.
-func dropMigrationLogTable(t *testing.T) {
+func dropMigrationLogTable(t *testing.T, d *session.Doctest) {
 	t.Helper()
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	defer db.Close()
 	if _, err := db.Exec(`DROP TABLE IF EXISTS t_sql_migration_log`); err != nil {
 		t.Fatalf("DROP t_sql_migration_log: %v", err)

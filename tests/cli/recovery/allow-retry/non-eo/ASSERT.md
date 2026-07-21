@@ -40,7 +40,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 	}
 	id := req.FixtureIDs[0]
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	requireLogStatus(t, db, id, "failed")
 }

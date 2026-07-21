@@ -33,7 +33,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		t.Fatal("setup: RecoveryNote empty")
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	requireLogStatus(t, db, id, "failed")
 	requireLogNote(t, db, id, req.RecoveryNote)

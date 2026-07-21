@@ -24,10 +24,14 @@ DB.QueryRow(ctx, "SELECT 1").Scan(&n) -> n==1
 - Sibling of interface (offline) and exec/query (mutating) branches.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
-	ensureMySQL(t)
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
+	ensureMySQL(t, d)
 	req.Op = "wrap"
 	t.Log("wrap branch: require live MySQL for SELECT 1 via Wrap")
 	return nil

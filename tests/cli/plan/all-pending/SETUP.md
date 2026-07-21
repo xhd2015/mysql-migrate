@@ -20,17 +20,21 @@ cli.Run(cfg, ["plan"]) -> apply for both, exit 0
 3. Expect apply ×2, exit 0.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const body = "SELECT 1;\n-- p5 plan all-pending\n"
 	dir := t.TempDir()
-	f1 := simpleFileName(1, fixtureSlug("plpend", "a"))
-	f2 := simpleFileName(2, fixtureSlug("plpend", "b"))
+	f1 := simpleFileName(1, fixtureSlug(d, "plpend", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "plpend", "b"))
 	id1 := writeMigration(t, dir, f1, body)
 	id2 := writeMigration(t, dir, f2, body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)

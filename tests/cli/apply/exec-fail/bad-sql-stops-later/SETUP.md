@@ -22,20 +22,24 @@ cli.Run(cfg, ["apply"])
 3. Expect exit 1, id1 failed, id2 not success, later table missing.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	dir := t.TempDir()
-	tblLater := fixtureTable("apbad", "later")
+	tblLater := fixtureTable(d, "apbad", "later")
 	bodyBad := "THIS IS NOT VALID MYSQL SQL FOR P5 APPLY FAIL;\n"
 	bodyOK := createTableSQL(tblLater) + "-- p5 apply bad-sql later\n"
 
-	f1 := simpleFileName(1, fixtureSlug("apbad", "bad"))
-	f2 := simpleFileName(2, fixtureSlug("apbad", "later"))
+	f1 := simpleFileName(1, fixtureSlug(d, "apbad", "bad"))
+	f2 := simpleFileName(2, fixtureSlug(d, "apbad", "later"))
 	idBad := writeMigration(t, dir, f1, bodyBad)
 	idLater := writeMigration(t, dir, f2, bodyOK)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tblLater)
 		deleteLogIDs(t, db, idBad, idLater)

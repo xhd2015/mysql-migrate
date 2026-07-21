@@ -3,7 +3,7 @@
 **Feature**: module root builds with go build ./...
 
 ```
-# from repo root (DOCTEST_ROOT/../..)
+# from repo root (d.DOCTEST_ROOT/../..)
 go build ./... -> exit 0
 
 # stubs allowed: migrate (+ optional inventory/plan/logrepo/cli/cmd)
@@ -11,7 +11,7 @@ go build ./... -> exit 0
 
 ## Preconditions
 
-- Module root is two levels above this doctest tree (`DOCTEST_ROOT/../..`).
+- Module root is two levels above this doctest tree (`d.DOCTEST_ROOT/../..`).
 - `go` is on PATH (checked by root Setup).
 - Production packages under the module may be stubs; they must compile.
 

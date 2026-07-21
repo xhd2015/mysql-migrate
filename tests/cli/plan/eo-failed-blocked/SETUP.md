@@ -23,21 +23,25 @@ cli.Run(cfg, ["plan"])
 3. Expect exit 1, blocked then deferred on stdout.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const (
 		bodyEO = "SELECT 1;\n-- p5 plan eo-failed\n"
 		bodyB  = "SELECT 2;\n-- p5 plan eo-failed later\n"
 	)
 	dir := t.TempDir()
-	fEO := eoFileName(1, fixtureSlug("pleo", "drop"))
-	fB := simpleFileName(2, fixtureSlug("pleo", "later"))
+	fEO := eoFileName(1, fixtureSlug(d, "pleo", "drop"))
+	fB := simpleFileName(2, fixtureSlug(d, "pleo", "later"))
 	idEO := writeMigration(t, dir, fEO, bodyEO)
 	idB := writeMigration(t, dir, fB, bodyB)
 
 	hashEO := contentSHA256(bodyEO)
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	seedFailed(t, db, idEO, true /* exactlyOnce */, hashEO, 7, "simulated EO failure")
 	deleteLogIDs(t, db, idB)

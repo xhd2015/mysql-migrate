@@ -25,17 +25,21 @@ mysql-migrate --dsn <harness> --dir <tmp> apply
 4. Expect exit 0, log success, table exists.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// Parent apply Setup already ensureMySQL + acquireMySQLExclusive.
 	dir := t.TempDir()
-	tbl := fixtureTable("oct", "a")
+	tbl := fixtureTable(d, "oct", "a")
 	body := createTableSQL(tbl) + "-- p2 cmd apply one-create\n"
-	f1 := simpleFileName(1, fixtureSlug("oct", "a"))
+	f1 := simpleFileName(1, fixtureSlug(d, "oct", "a"))
 	id1 := writeMigration(t, dir, f1, body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tbl)
 		deleteLogIDs(t, db, id1)

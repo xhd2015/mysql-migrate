@@ -26,11 +26,15 @@ mysql-migrate --dsn $DSN --dir <fixture> status
 - Proves P2 edge path for status (not only apply). Full status matrix lives in `tests/cli/status/`.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// Status branch requires reachable MySQL; skip early if down.
-	ensureMySQL(t)
+	ensureMySQL(t, d)
 	acquireMySQLExclusive(t)
 	req.ClearMigrateEnv = true
 	return nil

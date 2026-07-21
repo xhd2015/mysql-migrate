@@ -23,12 +23,16 @@ mysql-migrate --dsn <harness> --dir <tmp> status
 3. Expect exit 0, header row, fixture id with apply action.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	dir := t.TempDir()
 	body := "-- p2 cmd status one-pending\nSELECT 1;\n"
-	f1 := simpleFileName(1, fixtureSlug("stp", "a"))
+	f1 := simpleFileName(1, fixtureSlug(d, "stp", "a"))
 	id1 := writeMigration(t, dir, f1, body)
 
 	dsn := harnessDSN()

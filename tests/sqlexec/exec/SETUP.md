@@ -22,10 +22,14 @@ DB.Exec(ctx, CREATE|INSERT|DROP, args...) -> Result{RowsAffected} | error
 - Outcome siblings: success vs bad-sql.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
-	ensureMySQL(t)
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
+	ensureMySQL(t, d)
 	t.Log("exec branch: live MySQL for Exec success/error")
 	return nil
 }

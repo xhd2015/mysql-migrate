@@ -14,7 +14,7 @@ tests/docs Run -> os.ReadFile(README.md) -> phrase Assert per section leaf
 ## Preconditions
 
 - Working directory for the product is the mysql-migrate repo root
-  (`DOCTEST_ROOT/../..` from this tree).
+  (`d.DOCTEST_ROOT/../..` from this tree).
 - Module path in `go.mod` is `github.com/xhd2015/mysql-migrate`.
 - Production surface under test is **`README.md` at the module root**
   (Classic RED until implementer adds it with the locked phrases).
@@ -44,14 +44,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/xhd2015/doctest/session"
 )
 
-func Setup(t *testing.T, req *Request) error {
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	t.Helper()
 	if req == nil {
 		return fmt.Errorf("nil request")
 	}
-	moduleRoot := filepath.Clean(filepath.Join(DOCTEST_ROOT, "..", ".."))
+	moduleRoot := filepath.Clean(filepath.Join(d.DOCTEST_ROOT, "..", ".."))
 	st, err := os.Stat(moduleRoot)
 	if err != nil {
 		return fmt.Errorf("module root %s: %w", moduleRoot, err)

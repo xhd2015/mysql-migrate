@@ -21,10 +21,14 @@ DB.QueryRow(ctx, SELECT ...).Scan(&dest) -> value | sql.ErrNoRows
 - Outcome siblings: one-row success vs no-rows error.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
-	ensureMySQL(t)
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
+	ensureMySQL(t, d)
 	t.Log("query-row branch: live MySQL for QueryRow")
 	return nil
 }

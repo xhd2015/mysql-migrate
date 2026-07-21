@@ -45,7 +45,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		t.Fatalf("later migration %q must not report ok after stop\nstdout:\n%s", idLater, resp.Stdout)
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	requireLogStatus(t, db, idBad, "failed")
 	if st, ok := logStatus(t, db, idLater); ok && st == "success" {

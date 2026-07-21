@@ -22,25 +22,29 @@ cli.Run(cfg, ["apply", "--to", idB])
 3. Expect A+B success + tables; C no success log and no table; exit 0.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	dir := t.TempDir()
-	tblA := fixtureTable("apto", "a")
-	tblB := fixtureTable("apto", "b")
-	tblC := fixtureTable("apto", "c")
+	tblA := fixtureTable(d, "apto", "a")
+	tblB := fixtureTable(d, "apto", "b")
+	tblC := fixtureTable(d, "apto", "c")
 	bodyA := createTableSQL(tblA) + "-- p5 apply to-mid a\n"
 	bodyB := createTableSQL(tblB) + "-- p5 apply to-mid b\n"
 	bodyC := createTableSQL(tblC) + "-- p5 apply to-mid c\n"
 
-	f1 := simpleFileName(1, fixtureSlug("apto", "a"))
-	f2 := simpleFileName(2, fixtureSlug("apto", "b"))
-	f3 := simpleFileName(3, fixtureSlug("apto", "c"))
+	f1 := simpleFileName(1, fixtureSlug(d, "apto", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "apto", "b"))
+	f3 := simpleFileName(3, fixtureSlug(d, "apto", "c"))
 	idA := writeMigration(t, dir, f1, bodyA)
 	idB := writeMigration(t, dir, f2, bodyB)
 	idC := writeMigration(t, dir, f3, bodyC)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tblA, tblB, tblC)
 		deleteLogIDs(t, db, idA, idB, idC)

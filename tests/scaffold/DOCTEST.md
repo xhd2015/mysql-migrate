@@ -87,6 +87,7 @@ import (
 
 	"github.com/xhd2015/mysql-migrate/migrate"
 	"github.com/xhd2015/mysql-migrate/migrate/sqlexec"
+	"github.com/xhd2015/doctest/session"
 )
 
 // Mode selects which scaffold surface Run exercises.
@@ -127,7 +128,7 @@ type Response struct {
 
 // Run exercises the scaffold surface selected by req.Mode.
 // Classic RED until Config.DB exists and DSN is removed.
-func Run(t *testing.T, req *Request) (*Response, error) {
+func Run(t *testing.T, d *session.Doctest, req *Request) (*Response, error) {
 	t.Helper()
 	switch req.Mode {
 	case "config-fields-exist":
@@ -164,7 +165,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 		}, nil
 
 	case "packages-build":
-		moduleRoot := filepath.Clean(filepath.Join(DOCTEST_ROOT, "..", ".."))
+		moduleRoot := filepath.Clean(filepath.Join(d.DOCTEST_ROOT, "..", ".."))
 		cmd := exec.Command("go", "build", "./...")
 		cmd.Dir = moduleRoot
 		var stdout, stderr bytes.Buffer

@@ -98,6 +98,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/xhd2015/doctest/session"
 )
 
 // Request names the phrases this leaf requires in README.md.
@@ -122,13 +124,13 @@ type Response struct {
 
 // Run loads README.md from the module root (two levels above this tree).
 // Missing file is an observed outcome (Exists=false), not a harness error.
-func Run(t *testing.T, req *Request) (*Response, error) {
+func Run(t *testing.T, d *session.Doctest, req *Request) (*Response, error) {
 	t.Helper()
 	if req == nil {
 		return nil, fmt.Errorf("nil request")
 	}
 
-	moduleRoot := filepath.Clean(filepath.Join(DOCTEST_ROOT, "..", ".."))
+	moduleRoot := filepath.Clean(filepath.Join(d.DOCTEST_ROOT, "..", ".."))
 	readmePath := filepath.Join(moduleRoot, "README.md")
 
 	resp := &Response{

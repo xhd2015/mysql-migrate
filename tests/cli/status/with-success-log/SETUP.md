@@ -22,22 +22,26 @@ cli.Run(cfg, ["status"]) -> skip idA, apply idB, exit 0
 3. Expect skip for idA (duration visible), apply for idB, exit 0.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const (
 		bodyA = "SELECT 1;\n-- p5 status success-a\n"
 		bodyB = "SELECT 2;\n-- p5 status pending-b\n"
 	)
 	dir := t.TempDir()
-	f1 := simpleFileName(1, fixtureSlug("stskip", "a"))
-	f2 := simpleFileName(2, fixtureSlug("stskip", "b"))
+	f1 := simpleFileName(1, fixtureSlug(d, "stskip", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "stskip", "b"))
 	id1 := writeMigration(t, dir, f1, bodyA)
 	id2 := writeMigration(t, dir, f2, bodyB)
 
 	hashA := contentSHA256(bodyA)
 	const durationMS = 42
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	seedSuccess(t, db, id1, false, hashA, durationMS, "seeded-ok")
 	deleteLogIDs(t, db, id2) // ensure pending

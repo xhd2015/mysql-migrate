@@ -22,10 +22,14 @@ DB.Exec(ctx, "SELECT 1") -> error
 - Single meaningful outcome under close: after-close operations error.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
-	ensureMySQL(t)
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
+	ensureMySQL(t, d)
 	req.Op = "close"
 	t.Log("close branch: Close then Exec must error")
 	return nil
