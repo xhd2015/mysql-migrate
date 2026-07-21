@@ -46,7 +46,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		t.Fatalf("second apply should not refuse as blocked:\nstderr=%q", resp.Stderr)
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, id := range req.FixtureIDs {
 		requireLogStatus(t, db, id, "success")

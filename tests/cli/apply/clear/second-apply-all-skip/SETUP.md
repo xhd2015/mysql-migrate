@@ -21,24 +21,28 @@ cli.Run(cfg, ["apply"])
 3. Expect exit 0, not stubbed, both still success, tables still exist.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	dir := t.TempDir()
-	tblA := fixtureTable("ap2nd", "a")
-	tblB := fixtureTable("ap2nd", "b")
+	tblA := fixtureTable(d, "ap2nd", "a")
+	tblB := fixtureTable(d, "ap2nd", "b")
 	bodyA := createTableSQL(tblA) + "-- p5 apply second-skip a\n"
 	bodyB := createTableSQL(tblB) + "-- p5 apply second-skip b\n"
 
-	f1 := simpleFileName(1, fixtureSlug("ap2nd", "a"))
-	f2 := simpleFileName(2, fixtureSlug("ap2nd", "b"))
+	f1 := simpleFileName(1, fixtureSlug(d, "ap2nd", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "ap2nd", "b"))
 	id1 := writeMigration(t, dir, f1, bodyA)
 	id2 := writeMigration(t, dir, f2, bodyB)
 
 	hashA := contentSHA256(bodyA)
 	hashB := contentSHA256(bodyB)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tblA, tblB)
 		deleteLogIDs(t, db, id1, id2)

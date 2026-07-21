@@ -20,17 +20,21 @@ cli.Run(cfg, ["allow-retry", id, "--note", "should fail"])
 2. Expect exit 1, Error on stderr, log still failed.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const note = "p5 should not clear non-eo via allow-retry"
 	dir := t.TempDir()
 	body := "SELECT 1;\n-- p5 allow-retry non-eo\n"
-	f := simpleFileName(1, fixtureSlug("arno", "ne"))
+	f := simpleFileName(1, fixtureSlug(d, "arno", "ne"))
 	id := writeMigration(t, dir, f, body)
 	hash := contentSHA256(body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()

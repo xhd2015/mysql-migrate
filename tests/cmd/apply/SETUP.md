@@ -27,12 +27,16 @@ mysql-migrate --dsn $DSN --dir <fixture> apply
 - Optional end-to-end wire check; full apply matrix lives in `tests/cli/apply/`.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// Apply branch requires reachable MySQL; skip early if down.
 	// Exclusive lock serializes with status/ensure-created DROP.
-	ensureMySQL(t)
+	ensureMySQL(t, d)
 	acquireMySQLExclusive(t)
 	req.ClearMigrateEnv = true
 	return nil

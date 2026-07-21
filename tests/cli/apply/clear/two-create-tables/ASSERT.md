@@ -48,7 +48,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		t.Fatalf("summary should mention applied:\n%s", resp.Stdout)
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, id := range req.FixtureIDs {
 		requireLogStatus(t, db, id, "success")

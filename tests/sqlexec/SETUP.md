@@ -31,7 +31,7 @@ cli.Run(cfg{DB:nil}, ["status"]) -> exit 2 usage (missing DB)
      `lf:Xpassword@tcp(localhost:9306)/lifespan_db?charset=utf8mb4&parseTime=True`
 - Offline leaves: `interface/methods-present`, `config/*` (no MySQL).
 - Live leaves: root Setup pings MySQL; **skips** when unreachable.
-- Module root from this DOCTEST root: `DOCTEST_ROOT/..`.
+- Module root from this DOCTEST root: `d.DOCTEST_ROOT/..`.
 - Isolation: live leaves use unique table names via `tableName(leaf)` so parallel
   leaves do not collide. Prefer `DROP TABLE IF EXISTS` cleanup.
 - Session cache may record MySQL readiness once per `doctest test` run (flock + ready).
@@ -54,34 +54,35 @@ cli.Run(cfg{DB:nil}, ["status"]) -> exit 2 usage (missing DB)
 
 ```go
 import (
+	"sync"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/xhd2015/doctest/session"
 )
 
 // defaultLocalDSNPing matches DOCTEST.md defaultLocalDSN for harness connectivity.
 const defaultLocalDSNPing = "lf:Xpassword@tcp(localhost:9306)/lifespan_db?charset=utf8mb4&parseTime=True"
 
-func Setup(t *testing.T, req *Request) error {
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// Root: normalize slices; branches set Op and whether MySQL is required.
 	// Offline leaves (interface, config) must not require MySQL at root.
 	if req.SeedValues == nil {
 		req.SeedValues = []int64{}
 	}
-	t.Logf("sqlexec root setup: session=%s repo=%s", DOCTEST_SESSION_ID, repoRoot(t))
+	t.Logf("sqlexec root setup: session=%s repo=%s", d.DOCTEST_SESSION_ID, repoRoot(t, d))
 	return nil
 }
 
-func repoRoot(t *testing.T) string {
+func repoRoot(t *testing.T, d *session.Doctest) string {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join(DOCTEST_ROOT, ".."))
+	root, err := filepath.Abs(filepath.Join(d.DOCTEST_ROOT, ".."))
 	if err != nil {
 		t.Fatalf("repo root: %v", err)
 	}
@@ -96,81 +97,43 @@ func harnessDSN() string {
 	return defaultLocalDSNPing
 }
 
-// sessionCacheDir is shared across parallel leaves in one doctest test run.
-func sessionCacheDir() string {
-	return filepath.Join(os.TempDir(), "mysql-migrate-sqlexec-doctest-"+DOCTEST_SESSION_ID)
-}
+// Process-local MySQL reachability memo (one-process; not session flock).
+var (
+	ensureMySQLMu  sync.Mutex
+	ensureMySQLDid bool
+	ensureMySQLErr error
+)
 
-func withFileLock(t *testing.T, lockPath string, fn func() error) error {
+func ensureMySQL(t *testing.T, d *session.Doctest) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return err
+	ensureMySQLMu.Lock()
+	defer ensureMySQLMu.Unlock()
+	if ensureMySQLDid {
+		if ensureMySQLErr != nil {
+			t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
+		}
+		return
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return fn()
-}
-
-// ensureMySQL pings the harness DSN once per session (flock + ready marker).
-// Skips the leaf when MySQL is not reachable.
-func ensureMySQL(t *testing.T) {
-	t.Helper()
-	cache := sessionCacheDir()
-	if err := os.MkdirAll(cache, 0o755); err != nil {
-		t.Fatalf("session cache: %v", err)
-	}
-	lock := filepath.Join(cache, "mysql.lock")
-	ready := filepath.Join(cache, "mysql.ready")
+	ensureMySQLDid = true
 	dsn := harnessDSN()
-
-	var pingErr error
-	err := withFileLock(t, lock, func() error {
-		if _, statErr := os.Stat(ready); statErr == nil {
-			db, err := sql.Open("mysql", dsn)
-			if err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				pingErr = db.PingContext(ctx)
-				cancel()
-				_ = db.Close()
-				if pingErr == nil {
-					return nil
-				}
-				_ = os.Remove(ready)
-			}
-		}
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			pingErr = err
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		pingErr = db.PingContext(ctx)
-		cancel()
-		_ = db.Close()
-		if pingErr == nil {
-			return os.WriteFile(ready, []byte("ok"), 0o644)
-		}
-		return nil
-	})
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("ensureMySQL lock: %v", err)
+		ensureMySQLErr = err
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 	}
-	if pingErr != nil {
-		t.Skipf("MySQL not reachable at harness DSN (set MIGRATE_MYSQL_DSN or start local MySQL): %v", pingErr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ensureMySQLErr = db.PingContext(ctx)
+	cancel()
+	_ = db.Close()
+	if ensureMySQLErr != nil {
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 	}
 }
 
 // tableName builds an isolated InnoDB table name for a live leaf.
 // MySQL identifier-safe: prefix t_sqx_ + short session + leaf slug.
-func tableName(leaf string) string {
-	sid := DOCTEST_SESSION_ID
+func tableName(d *session.Doctest, leaf string) string {
+	sid := d.DOCTEST_SESSION_ID
 	var b strings.Builder
 	b.WriteString("t_sqx_")
 	n := 0

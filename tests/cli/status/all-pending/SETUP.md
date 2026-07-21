@@ -21,17 +21,21 @@ cli.Run(cfg, ["status"]) -> stdout apply for both ids, exit 0
 3. Expect both ids with action **apply**, exit 0.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const body = "SELECT 1;\n-- p5 status all-pending\n"
 	dir := t.TempDir()
-	f1 := simpleFileName(1, fixtureSlug("stpend", "a"))
-	f2 := simpleFileName(2, fixtureSlug("stpend", "b"))
+	f1 := simpleFileName(1, fixtureSlug(d, "stpend", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "stpend", "b"))
 	id1 := writeMigration(t, dir, f1, body)
 	id2 := writeMigration(t, dir, f2, body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := logrepo.EnsureTable(db); err != nil {
 		t.Fatalf("EnsureTable: %v", err)

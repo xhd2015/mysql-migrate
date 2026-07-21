@@ -20,17 +20,21 @@ cli.Run(cfg, ["mark-failed", id, "--note", "ops abort"])
 2. Expect exit 0, not stubbed, log failed + note.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const note = "p5 ops abort — mark-failed"
 	dir := t.TempDir()
 	body := "SELECT 1;\n-- p5 mark-failed with-note\n"
-	f := simpleFileName(1, fixtureSlug("mfail", "one"))
+	f := simpleFileName(1, fixtureSlug(d, "mfail", "one"))
 	id := writeMigration(t, dir, f, body)
 	hash := contentSHA256(body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()

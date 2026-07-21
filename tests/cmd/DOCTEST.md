@@ -20,6 +20,10 @@ go run ./cmd/mysql-migrate [global flags] <command> [args]
 Implementer surface (edge wiring):
 
 ```go
+import (
+	"os"
+)
+
 // cmd/mysql-migrate
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -160,15 +164,17 @@ MIGRATE_MYSQL_DIR
 
 ```go
 import (
+	"sync"
 	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/xhd2015/doctest/session"
 )
 
 // Request drives one invocation of the built mysql-migrate binary.
@@ -213,7 +219,7 @@ type Response struct {
 	Duration time.Duration
 }
 
-func Run(t *testing.T, req *Request) (*Response, error) {
+func Run(t *testing.T, d *session.Doctest, req *Request) (*Response, error) {
 	t.Helper()
 	if req == nil {
 		return nil, fmt.Errorf("nil request")
@@ -227,7 +233,7 @@ func Run(t *testing.T, req *Request) (*Response, error) {
 
 	workDir := req.WorkDir
 	if workDir == "" {
-		workDir = repoRoot(t)
+		workDir = repoRoot(t, d)
 	}
 
 	cmd := exec.Command(req.Bin, req.Args...)
@@ -280,66 +286,47 @@ func buildChildEnv(req *Request) []string {
 	return append(append([]string{}, base...), req.Env...)
 }
 
-func repoRoot(t *testing.T) string {
+func repoRoot(t *testing.T, d *session.Doctest) string {
 	t.Helper()
-	// DOCTEST_ROOT is tests/cmd → module root is ../..
-	root, err := filepath.Abs(filepath.Join(DOCTEST_ROOT, "..", ".."))
+	root, err := filepath.Abs(filepath.Join(d.DOCTEST_ROOT, "..", ".."))
 	if err != nil {
 		t.Fatalf("repo root: %v", err)
 	}
 	return root
 }
 
-func sessionCacheDir() string {
-	return filepath.Join(os.TempDir(), "mysql-migrate-cmd-doctest-"+DOCTEST_SESSION_ID)
-}
+// Process-local binary (one-process suite; in-memory mutex, not session flock).
+var (
+	buildBinaryOnceMu   sync.Mutex
+	buildBinaryOncePath string
+	buildBinaryOnceErr  error
+)
 
-func withFileLock(t *testing.T, lockPath string, fn func() error) error {
+func buildBinaryOnce(t *testing.T, d *session.Doctest) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return err
+	buildBinaryOnceMu.Lock()
+	defer buildBinaryOnceMu.Unlock()
+	if buildBinaryOncePath != "" || buildBinaryOnceErr != nil {
+		if buildBinaryOnceErr != nil {
+			t.Fatal(buildBinaryOnceErr)
+		}
+		return buildBinaryOncePath
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	dir, err := os.MkdirTemp("", "buildBinaryOnce-")
 	if err != nil {
-		return err
+		buildBinaryOnceErr = err
+		t.Fatal(err)
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
+	binPath := filepath.Join(dir, "mysql-migrate")
+	root := repoRoot(t, d)
+	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/mysql-migrate")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		buildBinaryOnceErr = fmt.Errorf("go build ./cmd/mysql-migrate: %w\n%s", err, strings.TrimSpace(string(out)))
+		t.Fatal(buildBinaryOnceErr)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return fn()
+	buildBinaryOncePath = binPath
+	return binPath
 }
 
-// buildBinaryOnce builds ./cmd/mysql-migrate once per doctest session (flock).
-func buildBinaryOnce(t *testing.T) string {
-	t.Helper()
-	cache := sessionCacheDir()
-	lock := filepath.Join(cache, "build.lock")
-	ready := filepath.Join(cache, "binaries.ready")
-	bin := filepath.Join(cache, "mysql-migrate")
-	root := repoRoot(t)
-
-	err := withFileLock(t, lock, func() error {
-		if st, e := os.Stat(ready); e == nil && st.Mode().IsRegular() {
-			if st2, e2 := os.Stat(bin); e2 == nil && st2.Mode().IsRegular() {
-				return nil
-			}
-		}
-		if err := os.MkdirAll(cache, 0o755); err != nil {
-			return err
-		}
-		cmd := exec.Command("go", "build", "-o", bin, "./cmd/mysql-migrate")
-		cmd.Dir = root
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("go build ./cmd/mysql-migrate: %w\n%s", err, strings.TrimSpace(string(out)))
-		}
-		return os.WriteFile(ready, []byte("ok"), 0o644)
-	})
-	if err != nil {
-		t.Fatalf("buildBinaryOnce: %v", err)
-	}
-	return bin
-}
 ```

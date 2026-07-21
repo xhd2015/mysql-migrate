@@ -26,18 +26,22 @@ FollowUp: apply
 3. Expect primary 0 + not stubbed; after chain log success + table exists + apply ok.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const note = "p5 ops approved EO retry after fix"
 	dir := t.TempDir()
-	tbl := fixtureTable("areo", "t")
+	tbl := fixtureTable(d, "areo", "t")
 	body := createTableSQL(tbl) + "-- p5 allow-retry eo-then-apply\n"
-	f := eoFileName(1, fixtureSlug("areo", "once"))
+	f := eoFileName(1, fixtureSlug(d, "areo", "once"))
 	id := writeMigration(t, dir, f, body)
 	hash := contentSHA256(body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tbl)
 		deleteLogIDs(t, db, id)

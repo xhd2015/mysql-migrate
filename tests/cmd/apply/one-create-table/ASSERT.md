@@ -45,7 +45,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		}
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	requireLogStatus(t, db, id, "success")
 	if !tableExists(t, db, tbl) {

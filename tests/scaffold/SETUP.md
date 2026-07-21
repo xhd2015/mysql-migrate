@@ -14,7 +14,7 @@ module root (go.mod) -> go build ./... -> exit 0
 ## Preconditions
 
 - Working directory for the product is the mysql-migrate repo root
-  (`DOCTEST_ROOT/../..` from this tree).
+  (`d.DOCTEST_ROOT/../..` from this tree).
 - Module path in `go.mod` is `github.com/xhd2015/mysql-migrate` (already present).
 - Go toolchain (`go`) is on PATH.
 - Package `github.com/xhd2015/mysql-migrate/migrate` with type `Config` is the

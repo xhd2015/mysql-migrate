@@ -23,10 +23,14 @@ DB.Query(ctx, SELECT ...) -> Rows
 - Outcome siblings: multi-row vs empty result set.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
-	ensureMySQL(t)
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
+	ensureMySQL(t, d)
 	t.Log("query branch: live MySQL for Query multi/empty")
 	return nil
 }

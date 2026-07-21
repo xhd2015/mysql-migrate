@@ -25,21 +25,25 @@ cli.Run(cfg, ["apply"])
 4. Expect both logs **success**, both tables exist, exit 0, progress ok.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	dir := t.TempDir()
-	tblA := fixtureTable("ap2ct", "a")
-	tblB := fixtureTable("ap2ct", "b")
+	tblA := fixtureTable(d, "ap2ct", "a")
+	tblB := fixtureTable(d, "ap2ct", "b")
 	bodyA := createTableSQL(tblA) + "-- p5 apply two-create a\n"
 	bodyB := createTableSQL(tblB) + "-- p5 apply two-create b\n"
 
-	f1 := simpleFileName(1, fixtureSlug("ap2ct", "a"))
-	f2 := simpleFileName(2, fixtureSlug("ap2ct", "b"))
+	f1 := simpleFileName(1, fixtureSlug(d, "ap2ct", "a"))
+	f2 := simpleFileName(2, fixtureSlug(d, "ap2ct", "b"))
 	id1 := writeMigration(t, dir, f1, bodyA)
 	id2 := writeMigration(t, dir, f2, bodyB)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		dropTables(t, db, tblA, tblB)
 		deleteLogIDs(t, db, id1, id2)

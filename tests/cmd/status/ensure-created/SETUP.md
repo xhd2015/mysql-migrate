@@ -30,11 +30,15 @@ mysql-migrate --dsn <harness> --dir <empty> status
 - Table is recreated by the binary; later leaves see it again after unlock.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// Parent already ensureMySQL + acquireMySQLExclusive.
-	dropMigrationLogTable(t)
+	dropMigrationLogTable(t, d)
 
 	dir := t.TempDir()
 	dsn := harnessDSN()

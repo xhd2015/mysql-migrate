@@ -25,18 +25,22 @@ FollowUp: status
 3. Expect follow-up status exit 0 and **skip** near id.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	fillConfigForDB(t, req)
 	const note = "p5 ops verified offline — mark-done"
 	dir := t.TempDir()
 	body := "SELECT 1;\n-- p5 mark-done then-status-skip\n"
-	f := simpleFileName(1, fixtureSlug("mdone", "one"))
+	f := simpleFileName(1, fixtureSlug(d, "mdone", "one"))
 	id := writeMigration(t, dir, f, body)
 	hash := contentSHA256(body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()

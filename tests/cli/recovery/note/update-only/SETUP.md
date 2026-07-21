@@ -20,17 +20,21 @@ cli.Run(cfg, ["note", id, "--note", "updated ops note"])
 2. Expect exit 0, status success, Note == RecoveryNote.
 
 ```go
-import "testing"
+import (
+	"testing"
 
-func Setup(t *testing.T, req *Request) error {
+	"github.com/xhd2015/doctest/session"
+)
+
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	const note = "p5 updated ops annotation"
 	dir := t.TempDir()
 	body := "SELECT 1;\n-- p5 note update-only\n"
-	f := simpleFileName(1, fixtureSlug("note", "one"))
+	f := simpleFileName(1, fixtureSlug(d, "note", "one"))
 	id := writeMigration(t, dir, f, body)
 	hash := contentSHA256(body)
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() {
 		deleteLogIDs(t, db, id)
 		_ = db.Close()

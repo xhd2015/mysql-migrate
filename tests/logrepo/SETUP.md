@@ -31,7 +31,7 @@ caller -> Get(id) | List() -> rows for plan/status
      `lf:Xpassword@tcp(localhost:9306)/lifespan_db?charset=utf8mb4&parseTime=True`
 - Root Setup pings MySQL once; **skips** the leaf when unreachable (MySQL
   optional for offline pure-unit suites).
-- Module root from this DOCTEST root: `DOCTEST_ROOT/..`.
+- Module root from this DOCTEST root: `d.DOCTEST_ROOT/..`.
 - Isolation: leaf `MigrationID` values must use prefix from `idPrefix()` so
   parallel leaves do not collide. Prefer DELETE by id over TRUNCATE.
 - Session cache may record MySQL readiness once per `doctest test` run (flock + ready).
@@ -54,31 +54,31 @@ caller -> Get(id) | List() -> rows for plan/status
 
 ```go
 import (
+	"sync"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/xhd2015/doctest/session"
 )
 
 // defaultLocalDSNPing matches DOCTEST.md defaultLocalDSN for harness connectivity.
 const defaultLocalDSNPing = "lf:Xpassword@tcp(localhost:9306)/lifespan_db?charset=utf8mb4&parseTime=True"
 
-func Setup(t *testing.T, req *Request) error {
+func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	// All logrepo leaves hit MySQL — skip cleanly when DSN is not reachable.
-	ensureMySQL(t)
+	ensureMySQL(t, d)
 	return nil
 }
 
-func repoRoot(t *testing.T) string {
+func repoRoot(t *testing.T, d *session.Doctest) string {
 	t.Helper()
-	// Root at tests/logrepo → module root is ..
-	root, err := filepath.Abs(filepath.Join(DOCTEST_ROOT, ".."))
+	root, err := filepath.Abs(filepath.Join(d.DOCTEST_ROOT, ".."))
 	if err != nil {
 		t.Fatalf("repo root: %v", err)
 	}
@@ -94,9 +94,9 @@ func harnessDSN() string {
 }
 
 // idPrefix returns a session-scoped migration_id prefix for isolation.
-func idPrefix() string {
+func idPrefix(d *session.Doctest) string {
 	// Keep short: migration_id VARCHAR(255); session ids can be long.
-	sid := DOCTEST_SESSION_ID
+	sid := d.DOCTEST_SESSION_ID
 	if len(sid) > 12 {
 		sid = sid[:12]
 	}
@@ -104,76 +104,40 @@ func idPrefix() string {
 }
 
 // leafMigrationID builds a unique migration_id for a leaf slug.
-func leafMigrationID(slug string) string {
+func leafMigrationID(d *session.Doctest, slug string) string {
 	return idPrefix() + slug
 }
 
-func sessionCacheDir() string {
-	return filepath.Join(os.TempDir(), "mysql-migrate-logrepo-doctest-"+DOCTEST_SESSION_ID)
-}
+// Process-local MySQL reachability memo (one-process; not session flock).
+var (
+	ensureMySQLMu  sync.Mutex
+	ensureMySQLDid bool
+	ensureMySQLErr error
+)
 
-func withFileLock(t *testing.T, lockPath string, fn func() error) error {
+func ensureMySQL(t *testing.T, d *session.Doctest) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return err
+	ensureMySQLMu.Lock()
+	defer ensureMySQLMu.Unlock()
+	if ensureMySQLDid {
+		if ensureMySQLErr != nil {
+			t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
+		}
+		return
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return fn()
-}
-
-// ensureMySQL pings the resolved DSN. Skips the leaf when MySQL is unavailable
-// so pure-unit trees remain usable offline. Does not start containers (this
-// standalone repo has no podman-compose harness).
-func ensureMySQL(t *testing.T) {
-	t.Helper()
-	cache := sessionCacheDir()
-	lock := filepath.Join(cache, "mysql.lock")
-	ready := filepath.Join(cache, "mysql.ready")
+	ensureMySQLDid = true
 	dsn := harnessDSN()
-
-	var pingErr error
-	err := withFileLock(t, lock, func() error {
-		if _, statErr := os.Stat(ready); statErr == nil {
-			// Re-verify quickly; ready may be stale across reboots.
-			db, err := sql.Open("mysql", dsn)
-			if err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				pingErr = db.PingContext(ctx)
-				cancel()
-				db.Close()
-				if pingErr == nil {
-					return nil
-				}
-				_ = os.Remove(ready)
-			}
-		}
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			pingErr = err
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		pingErr = db.PingContext(ctx)
-		cancel()
-		db.Close()
-		if pingErr == nil {
-			_ = os.WriteFile(ready, []byte("ok"), 0o644)
-		}
-		return nil
-	})
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("ensureMySQL lock: %v", err)
+		ensureMySQLErr = err
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 	}
-	if pingErr != nil {
-		t.Skipf("MySQL not reachable at resolved DSN (set MIGRATE_MYSQL_DSN or start local MySQL on :9306): %v", pingErr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ensureMySQLErr = db.PingContext(ctx)
+	cancel()
+	_ = db.Close()
+	if ensureMySQLErr != nil {
+		t.Skipf("MySQL not reachable at harness DSN (skip apply leaf): %v", ensureMySQLErr)
 	}
 }
 

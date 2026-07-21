@@ -48,7 +48,7 @@ func Assert(t *testing.T, req *Request, resp *Response, err error) {
 		t.Fatalf("--to mid must not apply %q\nstdout:\n%s", idC, resp.Stdout)
 	}
 
-	db := openLocalDB(t)
+	db := openLocalDB(t, d)
 	t.Cleanup(func() { _ = db.Close() })
 	requireLogStatus(t, db, idA, "success")
 	requireLogStatus(t, db, idB, "success")
