@@ -11,8 +11,9 @@
 | Branch | `master-2026-08-06-use-go-best-practice-to-review-current-project` |
 | Remote | `origin` → `ssh://git@github.com/xhd2015/mysql-migrate.git` |
 | Upstream | `origin/master-2026-08-06-use-go-best-practice-to-review-current-project` |
-| Push result | success (`70d4004..ab63caf`) |
-| Commit SHA | `ab63cafc2305f459d21acbb0df8c1b1fe22bfcec` (short: `ab63caf`) |
+| Push result | success (workflow `70d4004..ab63caf`; tip includes this note `ab63caf..41e40e7`) |
+| CI commit SHA | `ab63cafc2305f459d21acbb0df8c1b1fe22bfcec` (short: `ab63caf`) |
+| Branch tip SHA | `41e40e7a2340b471b35524c85c565590ae2052af` (short: `41e40e7`) |
 
 ## Paths changed (CI commit)
 
@@ -24,7 +25,8 @@
 - Repo: https://github.com/xhd2015/mysql-migrate
 - Actions (branch filter): https://github.com/xhd2015/mysql-migrate/actions?query=branch%3Amaster-2026-08-06-use-go-best-practice-to-review-current-project
 - Workflow file on branch: https://github.com/xhd2015/mysql-migrate/blob/master-2026-08-06-use-go-best-practice-to-review-current-project/.github/workflows/test.yml
-- Commit: https://github.com/xhd2015/mysql-migrate/commit/ab63cafc2305f459d21acbb0df8c1b1fe22bfcec
+- CI commit: https://github.com/xhd2015/mysql-migrate/commit/ab63cafc2305f459d21acbb0df8c1b1fe22bfcec
+- Branch tip: https://github.com/xhd2015/mysql-migrate/commit/41e40e7a2340b471b35524c85c565590ae2052af
 
 ## How this differs from doctest’s workflow
 
